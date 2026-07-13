@@ -1,0 +1,11 @@
+(ns em-frontend.config-test
+  "spec: config { ... } -- category config_default."
+  (:require [cljd.test :refer [deftest is]]
+            [em-frontend.config :as config]))
+
+(deftest defaults-match-spec
+  (is (= 1.0 config/default-zoom))
+  (is (= 0.0 config/default-pan-x))
+  (is (= 0.0 config/default-pan-y))
+  (is (= 0.1 config/min-zoom))
+  (is (= 5.0 config/max-zoom)))

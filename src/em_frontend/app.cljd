@@ -1,0 +1,204 @@
+(ns em-frontend.app
+  "spec: ties together every other namespace into the running app --
+   em-frontend.store's reactive state, em-frontend.stream's SSE ingestion,
+   em-frontend.canvas's per-timeline painting and hit-testing,
+   em-frontend.interaction's viewport/trace/filter rules, and the six
+   read-only panels.
+
+   Gesture-driven pan/zoom (InteractiveViewer's onInteraction* callbacks)
+   and tap-hit-test offsets are written from the Flutter API contract but
+   unverified against a live gesture/device -- check these first against a
+   running app.
+
+   `stream-url` defaults to emcli's own default `emcli serve` address
+   (../thecli/src/emcli/cli.clj's `default-server`); there's no real
+   config/CLI surface here yet to override it, since the spec doesn't cover
+   deployment configuration."
+  (:require ["package:flutter/material.dart" :as m]
+            [cljd.flutter :as f]
+            [em-frontend.store :as store]
+            [em-frontend.stream :as stream]
+            [em-frontend.interaction :as interaction]
+            [em-frontend.canvas :as canvas]
+            [em-frontend.panels.element-details :as p.element-details]
+            [em-frontend.panels.connection-details :as p.connection-details]
+            [em-frontend.panels.specification-expanded :as p.specification-expanded]
+            [em-frontend.panels.timeline-filter :as p.timeline-filter]
+            [em-frontend.panels.field-flow-trace :as p.field-flow-trace]))
+
+(def stream-url "http://localhost:8090/stream")
+
+(defn- apply-outcome!
+  "Applies a {:store :effects} rule result: swaps the domain store, and
+   folds ConnectionHighlighted/ConnectionDimmed effects into ui-atom's
+   transient connection-visual map (em-frontend.canvas's edge styling) --
+   the one piece of render-relevant state the spec models purely as
+   one-shot effects rather than stored fields (see em-frontend.interaction's
+   select-field-for-trace docstring)."
+  [store-atom ui-atom {:keys [store effects]}]
+  (reset! store-atom store)
+  (doseq [fx effects]
+    (case (:type fx)
+      :connection-highlighted (swap! ui-atom assoc-in [:connection-visual (:connection fx)] :highlighted)
+      :connection-dimmed (swap! ui-atom assoc-in [:connection-visual (:connection fx)] :dimmed)
+      nil)))
+
+;; == Canvas: per-timeline hit-testing + the whole-canvas InteractiveViewer ===
+
+(defn- timeline-widget [st ui store-atom ui-atom timeline-id]
+  (let [render-model (canvas/build-timeline-render-model st timeline-id)
+        painter (canvas/timeline-painter (assoc render-model :connection-visual (:connection-visual ui)))
+        size (get-in render-model [:layout :size])]
+    (m/GestureDetector
+      .onTapUp
+      (fn [^m/TapUpDetails details]
+        (let [pt (.-localPosition details)
+              layout (:layout render-model)]
+          (cond
+            (some? (canvas/hit-test-placement layout pt))
+            (swap! ui-atom assoc :selected-element (canvas/hit-test-placement layout pt)
+                                  :selected-connection nil)
+
+            (some? (canvas/hit-test-edge (:edges render-model) pt 6.0))
+            (swap! ui-atom assoc :selected-connection (canvas/hit-test-edge (:edges render-model) pt 6.0)
+                                  :selected-element nil)
+
+            (some? (canvas/hit-test-slice-header layout pt))
+            (swap! ui-atom update :expanded-slices
+                   (fn [s] (if (contains? s (canvas/hit-test-slice-header layout pt))
+                             (disj s (canvas/hit-test-slice-header layout pt))
+                             (conj s (canvas/hit-test-slice-header layout pt)))))))
+        nil)
+      .child
+      (m/CustomPaint .size (m/Size (:width size) (:height size)) .painter painter))))
+
+(defn- canvas-body [st ui store-atom ui-atom last-scale]
+  (let [filtered (get-in st [:visualization :filtered_timeline])
+        timeline-ids (if (some? filtered) [filtered] (keys (:timelines st)))]
+    (m/InteractiveViewer
+      .onInteractionStart
+      (fn [_] (reset! last-scale 1.0) (swap! store-atom #(:store (interaction/begin-interaction %))) nil)
+      .onInteractionEnd
+      (fn [_] (swap! store-atom #(:store (interaction/end-interaction %))) nil)
+      .onInteractionUpdate
+      (fn [^m/ScaleUpdateDetails details]
+        (let [delta (.-focalPointDelta details)
+              cur-scale (.-scale details)
+              zoom-ratio (/ cur-scale @last-scale)]
+          (reset! last-scale cur-scale)
+          (swap! store-atom #(:store (interaction/pan % (.-dx delta) (.-dy delta))))
+          (when (not= zoom-ratio 1.0)
+            (swap! store-atom #(:store (interaction/zoom % zoom-ratio)))))
+        nil)
+      .child
+      (m/Column
+        .mainAxisSize m/MainAxisSize.min
+        .children (mapv #(timeline-widget st ui store-atom ui-atom %) timeline-ids)))))
+
+;; == Overlays: field-flow banner, error banner, selection panels ============
+
+(defn- error-banner []
+  (m/Material
+    .color m/Colors.red.shade50
+    .elevation 2.0
+    .child (m/Padding .padding (m/EdgeInsets.all 8.0)
+             .child (m/Text "Stream connection lost -- last known state shown below."))))
+
+(defn- overlay-stack [st ui store-atom ui-atom last-scale]
+  (m/Stack
+    .children
+    (filterv some?
+      [(case (get-in st [:visualization :state])
+         :empty (m/Center .child (m/Text "No timelines yet"))
+         :rendered (canvas-body st ui store-atom ui-atom last-scale)
+         :error (canvas-body st ui store-atom ui-atom last-scale)
+         ;; nil (no snapshot yet) and :loading both show the spinner
+         (m/Center .child (m/CircularProgressIndicator)))
+
+       (when (= (get-in st [:visualization :state]) :error)
+         (m/Align .alignment m/Alignment.topCenter .child (error-banner)))
+
+       (when (pos? (count (get-in st [:visualization :highlighted_path] #{})))
+         (m/Align .alignment m/Alignment.topCenter
+           .child
+           (p.field-flow-trace/field-flow-trace-banner
+             {:highlighted-element-names
+              (mapv #(get-in st [:elements % :name]) (get-in st [:visualization :highlighted_path]))
+              :on-clear
+              (fn [] (apply-outcome! store-atom ui-atom (interaction/clear-field-flow-trace @store-atom)))})))
+
+       (when-some [eid (:selected-element ui)]
+         (m/Align .alignment m/Alignment.centerRight
+           .child
+           (p.element-details/element-details-panel
+             {:element (get-in st [:elements eid])
+              :on-select-field
+              (fn [field-name] (apply-outcome! store-atom ui-atom (interaction/select-field-for-trace @store-atom field-name)))
+              :on-close (fn [] (swap! ui-atom assoc :selected-element nil))})))
+
+       (when-some [cid (:selected-connection ui)]
+         (m/Align .alignment m/Alignment.centerRight
+           .child
+           (p.connection-details/connection-details-panel
+             {:connection (get-in st [:connections cid])
+              :from-name (get-in st [:elements (get-in st [:connections cid :from]) :name])
+              :to-name (get-in st [:elements (get-in st [:connections cid :to]) :name])
+              :on-close (fn [] (swap! ui-atom assoc :selected-connection nil))})))
+
+       (when-some [sid (first (:expanded-slices ui))]
+         (m/Align .alignment m/Alignment.bottomCenter
+           .child
+           (p.specification-expanded/specification-expanded-panel
+             {:specifications (filterv #(= (:slice %) sid) (vals (:specifications st)))
+              :expanded? true
+              :element-name-fn (fn [eid] (get-in st [:elements eid :name]))
+              :on-toggle (fn [] (swap! ui-atom update :expanded-slices disj sid))})))])))
+
+;; == Root ======================================================================
+
+(defn- app-bar [st store-atom ui-atom]
+  (m/AppBar
+    .title (m/Text (or (get-in st [:event-model :name]) "Event Model Visualization"))
+    .bottom
+    (m/PreferredSize
+      .preferredSize (m/Size.fromHeight 40.0)
+      .child
+      (m/Align
+        .alignment m/Alignment.centerLeft
+        .child
+        (m/SingleChildScrollView
+          .scrollDirection m/Axis.horizontal
+          .child
+          (m/Row
+            .mainAxisSize m/MainAxisSize.min
+            .children
+            (mapv (fn [t]
+                    (p.timeline-filter/timeline-header
+                      {:timeline t
+                       :active? (= (:id t) (get-in st [:visualization :filtered_timeline]))
+                       :on-filter (fn [tid] (apply-outcome! store-atom ui-atom (interaction/filter-to-timeline @store-atom tid)))
+                       :on-clear (fn [] (apply-outcome! store-atom ui-atom (interaction/clear-timeline-filter @store-atom)))}))
+                  (vals (:timelines st)))))))))
+
+(defn root []
+  (f/widget
+    :managed [store-atom (atom (store/initial-store)) :dispose nil]
+    :managed [ui-atom (atom {:connection-visual {} :selected-element nil
+                             :selected-connection nil :expanded-slices #{}})
+              :dispose nil]
+    :managed [last-scale (atom 1.0) :dispose nil]
+    :managed [_ (stream/connect! stream-url
+                  (fn [s] (apply-outcome! store-atom ui-atom (store/set-sse-state @store-atom s)))
+                  (fn [seed] (apply-outcome! store-atom ui-atom (store/snapshot-received @store-atom seed)))
+                  (fn [changes] (apply-outcome! store-atom ui-atom (store/ingest-delta @store-atom changes)))
+                  (fn [raw] (apply-outcome! store-atom ui-atom (store/invalid-delta-received @store-atom raw))))
+              :dispose nil]
+    :watch [st store-atom]
+    :watch [ui ui-atom]
+    (m/MaterialApp .title "Event Model Visualization" .debugShowCheckedModeBanner false)
+    .home
+    (m/Scaffold
+      .appBar (app-bar st store-atom ui-atom)
+      .body (overlay-stack st ui store-atom ui-atom last-scale))))
+
+(defn main [] (f/run (root)))

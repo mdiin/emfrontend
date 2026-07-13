@@ -1,0 +1,192 @@
+(ns em-frontend.canvas
+  "spec: the Canvas surface, plus the rendering conventions implied
+   throughout the Rules section: canvas_fields per ElementKind, a persistent
+   amber border while is_information_complete = false, and the
+   highlighted/dimmed connection styling FieldFlowHighlights declares.
+   AGENTS.md calls for a CustomPainter doing viewport-culled painting; one
+   painter is built per Timeline (matching the Canvas surface's own
+   `context timeline: Timeline`), so an off-screen timeline's table is
+   simply never built -- that is the culling.
+   Connections render right-to-left (ConnectionsRenderRightToLeft): `to`
+   never sits at an earlier column than `from`, so edges are drawn from a
+   from-card's right edge back to a to-card's left edge."
+  (:require ["package:flutter/material.dart" :as m]
+            ["dart:math" :as math]
+            [em-frontend.store :as store]
+            [em-frontend.layout :as layout]
+            [em-frontend.model :as model]
+            [em-frontend.edges :as edges]))
+
+(def slice-status-fill
+  {:created m/Colors.blue.shade50
+   :in_progress m/Colors.amber.shade50
+   :done m/Colors.green.shade50
+   :informational m/Colors.grey.shade200})
+
+(def element-kind-color
+  {:command m/Colors.blue
+   :event m/Colors.orange
+   :read_model m/Colors.green
+   :screen m/Colors.purple
+   :automation m/Colors.blueGrey})
+
+;; == Low-level drawing helpers ================================================
+
+(defn- ^m/Paint fill-paint [^m/Color color]
+  (doto (m/Paint) (.-color! color)))
+
+(defn- ^m/Paint stroke-paint [^m/Color color ^double width]
+  (doto (m/Paint)
+    (.-color! color)
+    (.-style! m/PaintingStyle.stroke)
+    (.-strokeWidth! width)))
+
+(defn- rect->m [{:keys [x y width height]}]
+  (m/Rect.fromLTWH x y width height))
+
+(defn- draw-text [^m/Canvas canvas ^String text ^double x ^double y ^m/TextStyle style ^double max-width]
+  (let [tp (m/TextPainter
+             .text (m/TextSpan .text text .style style)
+             .textDirection m/TextDirection.ltr
+             .ellipsis "…"
+             .maxLines 1)]
+    (.layout tp .maxWidth max-width)
+    (.paint tp canvas (m/Offset x y))))
+
+;; == Resolving one timeline's render model from the store ====================
+
+(defn build-timeline-render-model
+  "Resolves one timeline's slices/placements/elements/swimlanes/connections
+   from the store into the geometry (via em-frontend.layout) and edge
+   endpoints (via em-frontend.edges' same nearest-placement predicate the
+   relayout rules use) that the painter below draws."
+  [store-val timeline-id]
+  (let [slices (filterv #(= (:timeline %) timeline-id) (vals (:slices store-val)))
+        slice-ids (into #{} (map :id) slices)
+        placements (filterv #(slice-ids (:slice %)) (vals (:placements store-val)))
+        swimlane-order (vec (keys (:swimlanes store-val)))
+        lay (layout/layout-timeline {:slices slices :placements placements
+                                      :elements (:elements store-val)
+                                      :swimlane-order swimlane-order})
+        placement-by-id (into {} (map (fn [p] [(:placement-id p) p])) (:placements lay))
+        placed-element-ids (into #{} (map :element) placements)
+        candidate-connections
+        (filter (fn [c] (or (contains? placed-element-ids (:from c))
+                            (contains? placed-element-ids (:to c))))
+                (vals (:connections store-val)))
+        edge-lines
+        (for [c candidate-connections
+              :let [from-geo (map #(store/placement-geometry store-val %)
+                                   (store/placements-of-element store-val (:from c)))
+                    to-geo (map #(store/placement-geometry store-val %)
+                                 (store/placements-of-element store-val (:to c)))]
+              {:keys [from to timeline]} (edges/drawn-edges from-geo to-geo)
+              :when (= timeline timeline-id)
+              :let [pf (get placement-by-id from) pt (get placement-by-id to)]
+              :when (and pf pt)]
+          {:connection-id (:id c) :from-rect (:rect pf) :to-rect (:rect pt)})]
+    {:layout lay
+     :slices (into {} (map (fn [s] [(:id s) s])) slices)
+     :swimlanes (:swimlanes store-val)
+     :swimlane-order swimlane-order
+     :elements (:elements store-val)
+     :edges (vec edge-lines)}))
+
+;; == The painter ===============================================================
+
+(defn timeline-painter
+  "render-model: as returned by build-timeline-render-model, plus
+   connection-visual, a {connection-id -> :highlighted|:dimmed} map (see
+   em-frontend.interaction/select-field-for-trace; absent means :normal)."
+  ^m/CustomPainter
+  [{:keys [layout slices swimlanes swimlane-order elements edges connection-visual]}]
+  (reify :extends m/CustomPainter
+    (paint [this ^m/Canvas canvas ^m/Size size]
+      (doseq [{:keys [row rect]} (:swimlane-bands layout)]
+        (.drawRect canvas (rect->m rect) (fill-paint m/Colors.grey.shade50))
+        (when (pos? row)
+          (when-some [sw (get swimlanes (nth swimlane-order (dec row) nil))]
+            (draw-text canvas (or (:name sw) "") 4.0 (+ (:y rect) 8.0)
+                       (m/TextStyle .fontSize 11.0 .fontWeight m/FontWeight.w500)
+                       (- layout/swimlane-label-width 8.0)))))
+      (doseq [{:keys [slice-id rect]} (:slice-headers layout)
+              :let [slice (get slices slice-id)]]
+        (.drawRect canvas (rect->m rect)
+                   (fill-paint (get slice-status-fill (:status slice) m/Colors.white)))
+        (draw-text canvas (or (:title slice) "") (+ (:x rect) 8.0) (+ (:y rect) 8.0)
+                   (m/TextStyle .fontWeight m/FontWeight.bold .fontSize 13.0)
+                   (- (:width rect) 16.0)))
+      (doseq [{:keys [connection-id from-rect to-rect]} edges
+              :let [visual (get connection-visual connection-id :normal)
+                    color (case visual
+                            :highlighted m/Colors.deepOrange
+                            :dimmed m/Colors.grey.shade300
+                            m/Colors.blueGrey)
+                    width (if (= visual :highlighted) 2.5 1.0)
+                    from-pt (m/Offset (+ (:x from-rect) (:width from-rect))
+                                       (+ (:y from-rect) (/ (:height from-rect) 2)))
+                    to-pt (m/Offset (:x to-rect) (+ (:y to-rect) (/ (:height to-rect) 2)))]]
+        (.drawLine canvas from-pt to-pt (stroke-paint color width)))
+      (doseq [{:keys [element-id rect]} (:placements layout)
+              :let [element (get elements element-id)
+                    incomplete (false? (:is_information_complete element))
+                    kind-color (get element-kind-color (:kind element) m/Colors.grey)
+                    rrect (m/RRect.fromRectAndRadius (rect->m rect) (m/Radius.circular 6.0))]]
+        (.drawRRect canvas rrect (fill-paint m/Colors.white))
+        (.drawRRect canvas rrect (stroke-paint (if incomplete m/Colors.amber kind-color)
+                                                (if incomplete 2.5 1.5)))
+        (draw-text canvas (or (:name element) "") (+ (:x rect) 8.0) (+ (:y rect) 8.0)
+                   (m/TextStyle .fontWeight m/FontWeight.w600 .fontSize 12.0)
+                   (- (:width rect) 16.0))
+        (doseq [[i field] (map-indexed vector (take 4 (model/canvas-fields element)))]
+          (draw-text canvas (str (:name field) ": " (name (:type field)))
+                     (+ (:x rect) 8.0) (+ (:y rect) 28.0 (* i 16.0))
+                     (m/TextStyle .fontSize 10.0 .color m/Colors.grey.shade700)
+                     (- (:width rect) 16.0))))
+      nil)
+    (shouldRepaint [this _] true)))
+
+;; == Hit-testing (element/connection tap-to-select) ===========================
+
+(defn hit-test-placement
+  "The element-id of the placement card at `point` (widget-local
+   coordinates), or nil."
+  [layout ^m/Offset point]
+  (let [x (.-dx point) y (.-dy point)]
+    (some (fn [{:keys [element-id rect]}]
+            (when (and (<= (:x rect) x (+ (:x rect) (:width rect)))
+                       (<= (:y rect) y (+ (:y rect) (:height rect))))
+              element-id))
+          (:placements layout))))
+
+(defn hit-test-slice-header
+  "The slice-id of the column header at `point`, or nil -- opens
+   SpecificationExpanded for that slice."
+  [layout ^m/Offset point]
+  (let [x (.-dx point) y (.-dy point)]
+    (some (fn [{:keys [slice-id rect]}]
+            (when (and (<= (:x rect) x (+ (:x rect) (:width rect)))
+                       (<= (:y rect) y (+ (:y rect) (:height rect))))
+              slice-id))
+          (:slice-headers layout))))
+
+(defn- point-segment-distance [px py x1 y1 x2 y2]
+  (let [dx (- x2 x1) dy (- y2 y1)
+        len2 (+ (* dx dx) (* dy dy))
+        t (if (zero? len2) 0.0 (max 0.0 (min 1.0 (/ (+ (* (- px x1) dx) (* (- py y1) dy)) len2))))
+        cx (+ x1 (* t dx)) cy (+ y1 (* t dy))]
+    (math/sqrt (+ (* (- px cx) (- px cx)) (* (- py cy) (- py cy))))))
+
+(defn hit-test-edge
+  "The connection-id of the edge line passing within `threshold` px of
+   `point`, or nil."
+  [edges ^m/Offset point threshold]
+  (let [x (.-dx point) y (.-dy point)]
+    (some (fn [{:keys [connection-id from-rect to-rect]}]
+            (let [x1 (+ (:x from-rect) (:width from-rect))
+                  y1 (+ (:y from-rect) (/ (:height from-rect) 2))
+                  x2 (:x to-rect)
+                  y2 (+ (:y to-rect) (/ (:height to-rect) 2))]
+              (when (<= (point-segment-distance x y x1 y1 x2 y2) threshold)
+                connection-id)))
+          edges)))

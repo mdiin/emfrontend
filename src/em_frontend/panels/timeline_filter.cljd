@@ -1,0 +1,23 @@
+(ns em-frontend.panels.timeline-filter
+  "spec: surface TimelineFilter -- timeline header click filters the view to
+   that timeline's table; clicking the active timeline clears the filter,
+   clicking another switches to it."
+  (:require ["package:flutter/material.dart" :as m]))
+
+(defn timeline-header
+  "{:keys [timeline active? on-filter on-clear]}
+   `active?` is true when this timeline is the currently filtered one."
+  [{:keys [timeline active? on-filter on-clear]}]
+  (m/InkWell
+    .onTap (fn [] (if active? (on-clear) (on-filter (:id timeline))) nil)
+    .child
+    (m/Container
+      .padding (m/EdgeInsets.symmetric .horizontal 12.0 .vertical 6.0)
+      .color (if active? m/Colors.blue.shade100 m/Colors.transparent)
+      .child
+      (m/Row
+        .mainAxisSize m/MainAxisSize.min
+        .children
+        (filterv some?
+          [(m/Text (:title timeline) .style (m/TextStyle .fontWeight m/FontWeight.bold))
+           (when active? (m/Icon m/Icons.filter_alt .size 16.0))])))))

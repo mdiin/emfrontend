@@ -1,0 +1,4 @@
+(ns em-frontend.main
+  (:require [em-frontend.app :as app]))
+
+(defn main [] (app/main))

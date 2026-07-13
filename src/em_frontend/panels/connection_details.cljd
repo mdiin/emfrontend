@@ -1,0 +1,35 @@
+(ns em-frontend.panels.connection-details
+  "spec: surface ConnectionDetails -- read-only panel for a clicked
+   connection, showing endpoints and per-field derivations
+   (target_field <- source_fields)."
+  (:require ["package:flutter/material.dart" :as m]))
+
+(defn- derivation-tile [derivation]
+  (m/ListTile
+    .dense true
+    .title (m/Text (str (:target_field derivation) " <- "
+                        (apply str (interpose ", " (:source_fields derivation)))))))
+
+(defn connection-details-panel
+  "{:keys [connection from-name to-name on-close]}"
+  [{:keys [connection from-name to-name on-close]}]
+  (m/Card
+    .child
+    (m/Padding
+      .padding (m/EdgeInsets.all 12.0)
+      .child
+      (m/Column
+        .crossAxisAlignment m/CrossAxisAlignment.start
+        .mainAxisSize m/MainAxisSize.min
+        .children
+        [(m/Row
+           .mainAxisAlignment m/MainAxisAlignment.spaceBetween
+           .children
+           [(m/Text (str from-name " -> " to-name)
+                    .style (m/TextStyle .fontWeight m/FontWeight.bold .fontSize 16.0))
+            (m/IconButton .icon (m/Icon m/Icons.close) .onPressed (fn [] (on-close) nil))])
+         (m/Divider)
+         (m/Text "Derivations" .style (m/TextStyle .fontWeight m/FontWeight.w600))
+         (m/Column
+           .mainAxisSize m/MainAxisSize.min
+           .children (mapv derivation-tile (:derivations connection)))]))))

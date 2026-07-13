@@ -1,0 +1,60 @@
+(ns em-frontend.panels.specification-expanded
+  "spec: surface SpecificationExpanded -- all specifications in a slice
+   share one expand/collapse toggle (ToggleSliceSpecifications); expanded
+   shows Given/When/Then steps in index order with their examples."
+  (:require ["package:flutter/material.dart" :as m]))
+
+(def ^:private clause-label
+  {:given_step "Given" :when_step "When" :then_step "Then"})
+
+(defn- step-description [step element-name-fn]
+  (cond
+    (:is_error step) (str "error: " (:error_name step))
+    (:expect_empty step) "(empty)"
+    (some? (:element step)) (element-name-fn (:element step))
+    :else ""))
+
+(defn- example-tile [example]
+  (m/Text (str (:field_name example) " = " (:field_value example))
+          .style (m/TextStyle .fontSize 11.0 .color m/Colors.grey.shade700)))
+
+(defn- step-row [step element-name-fn]
+  (m/Padding
+    .padding (m/EdgeInsets.only .left 8.0 .top 2.0 .bottom 2.0)
+    .child
+    (m/Column
+      .crossAxisAlignment m/CrossAxisAlignment.start
+      .mainAxisSize m/MainAxisSize.min
+      .children
+      (into [(m/Text (str (get clause-label (:clause step) "") ": "
+                          (step-description step element-name-fn)))]
+            (mapv example-tile (:examples step))))))
+
+(defn- specification-tile [spec element-name-fn]
+  (m/Padding
+    .padding (m/EdgeInsets.symmetric .vertical 6.0)
+    .child
+    (m/Column
+      .crossAxisAlignment m/CrossAxisAlignment.start
+      .mainAxisSize m/MainAxisSize.min
+      .children
+      (into [(m/Text (:title spec) .style (m/TextStyle .fontWeight m/FontWeight.w600))]
+            (mapv #(step-row % element-name-fn) (sort-by :index (:steps spec)))))))
+
+(defn specification-expanded-panel
+  "{:keys [specifications expanded? element-name-fn on-toggle]}"
+  [{:keys [specifications expanded? element-name-fn on-toggle]}]
+  (m/Card
+    .child
+    (m/InkWell
+      .onTap (fn [] (on-toggle) nil)
+      .child
+      (m/Padding
+        .padding (m/EdgeInsets.all 12.0)
+        .child
+        (if expanded?
+          (m/Column
+            .crossAxisAlignment m/CrossAxisAlignment.start
+            .mainAxisSize m/MainAxisSize.min
+            .children (mapv #(specification-tile % element-name-fn) specifications))
+          (m/Text (str (count specifications) " specification(s) -- tap to expand")))))))

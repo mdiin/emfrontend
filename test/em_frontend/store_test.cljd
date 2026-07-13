@@ -1,0 +1,312 @@
+(ns em-frontend.store-test
+  "spec: `Rules` and `Invariants` sections of em-frontend.allium. Categories
+   rule_success, rule_failure, rule_entity_creation, transition_edge,
+   transition_rejected, invariant."
+  (:require [cljd.test :refer [deftest is testing]]
+            [em-frontend.store :as store]
+            [em-frontend.invariants :as invariants]))
+
+;; == Fixtures ==================================================================
+;; A minimal but structurally complete snapshot: one timeline/slice/swimlane,
+;; two elements connected by one same-timeline, same-column-adjacent pair
+;; (so edges/drawn-edges draws exactly one edge and ConnectionsRenderRightToLeft
+;; holds: to.index (1) >= from.index (0)).
+
+(defn- base-snapshot [timelines]
+  {:model {:id :m1 :name "Checkout"}
+   :timelines timelines
+   :slices {:s1 {:id :s1 :timeline :t1 :title "Place order" :kind :state_change :status :done :index 0}}
+   :swimlanes {:sw1 {:id :sw1 :name "Sales"}}
+   :elements {:e1 {:id :e1 :name "PlaceOrder" :kind :command :context :internal
+                   :is_information_complete true :fields [] :field_origins []
+                   :swimlane nil :image_url nil}
+              :e2 {:id :e2 :name "OrderPlaced" :kind :event :context :internal
+                   :is_information_complete true :fields [] :field_origins []
+                   :swimlane nil :image_url nil}}
+   :placements {:p1 {:id :p1 :slice :s1 :element :e1}}
+   :connections {:c1 {:id :c1 :from :e1 :to :e2 :derivations []}}
+   :specifications {}
+   :spec-steps {}})
+
+(def snapshot-with-timeline (base-snapshot {:t1 {:id :t1 :title "Checkout"}}))
+(def snapshot-empty (base-snapshot {}))
+
+(defn- store-with-snapshot []
+  (:store (store/snapshot-received (store/initial-store) snapshot-with-timeline)))
+
+;; == Stream lifecycle and seeding =============================================
+
+(deftest snapshot-creates-model-test
+  (testing "rule SnapshotCreatesModel: no prior Visualization -> seeded store,
+            Visualization created at config defaults"
+    (let [{:keys [store effects]} (store/snapshot-received (store/initial-store) snapshot-with-timeline)]
+      (is (= {:id :m1 :name "Checkout"} (:event-model store)))
+      (is (= 1.0 (get-in store [:visualization :zoom])))
+      (is (= 0.0 (get-in store [:visualization :pan_x])))
+      (is (false? (get-in store [:visualization :interacting])))
+      (is (= #{} (get-in store [:visualization :highlighted_path])))
+      (is (some #(= :store-seeded (:type %)) effects)))))
+
+(deftest empty-model-rendered-test
+  (testing "rule EmptyModelRendered: a snapshot with no timelines -> viz.state = :empty"
+    (let [{:keys [store]} (store/snapshot-received (store/initial-store) snapshot-empty)]
+      (is (= :empty (get-in store [:visualization :state]))))))
+
+(deftest model-rendered-test
+  (testing "rule ModelRendered: at least one timeline -> viz.state = :rendered"
+    (let [{:keys [store]} (store/snapshot-received (store/initial-store) snapshot-with-timeline)]
+      (is (= :rendered (get-in store [:visualization :state]))))))
+
+(deftest reconnect-preserves-viewport-test
+  (testing "rule ReconnectPreservesViewport: zoom/pan/filter/trace/interacting survive
+            a reseed; the delta-built store is wholesale replaced, not merged"
+    (let [seeded (store-with-snapshot)
+          zoomed (assoc-in seeded [:visualization :zoom] 2.5)
+          zoomed (assoc-in zoomed [:visualization :pan_x] 40.0)
+          zoomed (assoc-in zoomed [:visualization :filtered_timeline] :t1)
+          zoomed (assoc-in zoomed [:visualization :interacting] true)
+          {:keys [store]} (store/snapshot-received zoomed snapshot-empty)]
+      (is (= 2.5 (get-in store [:visualization :zoom])))
+      (is (= 40.0 (get-in store [:visualization :pan_x])))
+      (is (= :t1 (get-in store [:visualization :filtered_timeline])))
+      (is (true? (get-in store [:visualization :interacting])))
+      (is (= :empty (get-in store [:visualization :state])) "reseed re-evaluates loading -> empty/rendered")
+      (is (= {} (:timelines store)) "stale delta-built timelines are discarded, not merged"))))
+
+;; == SSE connection state machine =============================================
+
+(deftest error-state-shows-message-test
+  (testing "rule ErrorStateShowsMessage: transitions_to :error, requires a Visualization"
+    (let [store (store-with-snapshot)
+          {:keys [store effects]} (store/set-sse-state store :error)]
+      (is (= :error (get-in store [:visualization :state])))
+      (is (some #(= :error-overlay-shown (:type %)) effects))))
+  (testing "no Visualization yet -> sse-connection state still updates, no overlay effect"
+    (let [{:keys [store effects]} (store/set-sse-state (store/initial-store) :error)]
+      (is (= :error (get-in store [:sse-connection :state])))
+      (is (nil? (:visualization store)))
+      (is (= [] effects))))
+  (testing "re-firing while already :error does not re-emit the overlay effect (becomes, not is)"
+    (let [store (store-with-snapshot)
+          {store :store} (store/set-sse-state store :error)
+          {:keys [effects]} (store/set-sse-state store :error)]
+      (is (= [] effects)))))
+
+;; == Element deltas ============================================================
+
+(deftest element-creation-animates-test
+  (let [store (store-with-snapshot)
+        new-element {:id :e3 :name "CancelOrder" :kind :command :context :internal
+                     :is_information_complete true :fields [] :field_origins []
+                     :swimlane nil :image_url nil}
+        {:keys [store effects]} (store/element-created store new-element)]
+    (is (= new-element (get-in store [:elements :e3])))
+    (is (some #(= :element-appears (:type %)) effects))))
+
+(deftest incomplete-element-marked-on-creation-test
+  (testing "rule IncompleteElementMarked also fires on creation-with-false
+            (creation is itself a `becomes` transition from absent)"
+    (let [store (store-with-snapshot)
+          element {:id :e3 :name "CancelOrder" :kind :command :context :internal
+                   :is_information_complete false :fields [] :field_origins []
+                   :swimlane nil :image_url nil}
+          {:keys [effects]} (store/element-created store element)]
+      (is (some #(= :amber-border-rendered (:type %)) effects)))))
+
+(deftest element-update-rerenders-test
+  (let [store (store-with-snapshot)
+        updated (assoc (get-in store [:elements :e1]) :name "PlaceOrderRenamed")
+        {:keys [store effects]} (store/element-updated store updated)]
+    (is (= "PlaceOrderRenamed" (get-in store [:elements :e1 :name])))
+    (is (some #(= :element-rerendered (:type %)) effects))
+    (testing "relayout scope is every timeline hosting a placement of this element"
+      (is (some #(and (= :timeline-laid-out (:type %)) (= :t1 (:timeline %))) effects)))))
+
+(deftest incomplete-element-marked-becomes-semantics-test
+  (let [store (store-with-snapshot)]
+    (testing "true -> false fires AmberBorderRendered"
+      (let [updated (assoc (get-in store [:elements :e1]) :is_information_complete false)
+            {:keys [effects]} (store/element-updated store updated)]
+        (is (some #(= :amber-border-rendered (:type %)) effects))))
+    (testing "false -> false does not re-fire"
+      (let [already-false (assoc-in store [:elements :e1 :is_information_complete] false)
+            updated (assoc (get-in already-false [:elements :e1]) :name "still incomplete")
+            {:keys [effects]} (store/element-updated already-false updated)]
+        (is (not (some #(= :amber-border-rendered (:type %)) effects)))))
+    (testing "false -> true does not fire (rule only watches for becomes false)"
+      (let [already-false (assoc-in store [:elements :e1 :is_information_complete] false)
+            updated (assoc (get-in already-false [:elements :e1]) :is_information_complete true)
+            {:keys [effects]} (store/element-updated already-false updated)]
+        (is (not (some #(= :amber-border-rendered (:type %)) effects)))))))
+
+(deftest element-deletion-cascades-test
+  (testing "rules ElementDeletionAnimates + DeletionCleansConnections: placements and
+            both-direction connections are removed, affected timelines relaid out"
+    (let [store (store-with-snapshot)
+          {:keys [store effects]} (store/element-deleted store :e1)]
+      (is (nil? (get-in store [:elements :e1])))
+      (is (= {} (:placements store)) "the placement referencing the deleted element is gone")
+      (is (= {} (:connections store)) "the outgoing connection is gone")
+      (is (some #(= :element-disappears (:type %)) effects))
+      (is (some #(and (= :timeline-laid-out (:type %)) (= :t1 (:timeline %))) effects)))))
+
+;; == Connection deltas =========================================================
+
+(deftest connection-change-relays-out-scoped-test
+  (testing "rule ConnectionChangeRelaysOut: a same-timeline drawn pair relays out
+            exactly that timeline"
+    (let [store (store-with-snapshot)
+          store (assoc-in store [:placements :p2] {:id :p2 :slice :s1 :element :e2})
+          store (assoc-in store [:slices :s1 :index] 0)
+          {:keys [store effects]} (store/connection-changed store :updated (get-in store [:connections :c1]))]
+      (is (some #(and (= :timeline-laid-out (:type %)) (= :t1 (:timeline %))) effects))))
+  (testing "an element with no placement at all draws no edge -> no relayout effect"
+    (let [store (store-with-snapshot)
+          {:keys [effects]} (store/connection-changed store :updated (get-in store [:connections :c1]))]
+      ;; e2 has no placement in the base fixture, so from/to never share a timeline
+      (is (= [] effects)))))
+
+(deftest connection-deleted-resolves-via-prior-entry-test
+  (testing "on delete, the delta carries only identity, but the frontend's own
+            previously-synced Connection (with from/to) is still resolvable"
+    (let [store (store-with-snapshot)
+          store (assoc-in store [:placements :p2] {:id :p2 :slice :s1 :element :e2})
+          {:keys [store effects]} (store/connection-changed store :deleted {:id :c1})]
+      (is (nil? (get-in store [:connections :c1])))
+      (is (some #(= :timeline-laid-out (:type %)) effects)))))
+
+(deftest connection-derivations-rerenders-test
+  (testing "rule ConnectionDerivationsRerenders: provenance-only update, no layout pass"
+    (let [store (store-with-snapshot)
+          updated (assoc (get-in store [:connections :c1]) :derivations [{:target_field "x" :source_fields ["y"]}])
+          {:keys [store effects]} (store/connection-derivations-updated store updated)]
+      (is (= [{:target_field "x" :source_fields ["y"]}] (get-in store [:connections :c1 :derivations])))
+      (is (= [{:type :connection-rerendered :connection updated}] effects))
+      (is (not (some #(= :timeline-laid-out (:type %)) effects))))))
+
+;; == Timeline / swimlane / slice / placement deltas ==========================
+
+(deftest timeline-change-relays-out-test
+  (doseq [change [:created :updated :deleted]]
+    (testing (str "rule TimelineChangeRelaysOut: " change " -> full CanvasRelaidOut")
+      (let [store (store-with-snapshot)
+            {:keys [effects]} (store/timeline-changed store change {:id :t1 :title "Renamed"})]
+        (is (= [{:type :canvas-relaid-out}] effects))))))
+
+(deftest swimlane-change-relays-out-test
+  (doseq [change [:created :updated :deleted]]
+    (testing (str "rule SwimlaneChangeRelaysOut: " change " -> full CanvasRelaidOut")
+      (let [store (store-with-snapshot)
+            {:keys [effects]} (store/swimlane-changed store change {:id :sw1 :name "Renamed"})]
+        (is (= [{:type :canvas-relaid-out}] effects))))))
+
+(deftest slice-change-triggers-layout-test
+  (testing "rule SliceChangeTriggersLayout: relayout scoped to the owning timeline"
+    (let [store (store-with-snapshot)
+          {:keys [store effects]} (store/slice-changed store :updated
+                                     (assoc (get-in store [:slices :s1]) :status :in_progress))]
+      (is (= :in_progress (get-in store [:slices :s1 :status])))
+      (is (= [{:type :timeline-laid-out :timeline :t1}] effects))))
+  (testing "on delete, the owning timeline is resolved from the prior entry"
+    (let [store (store-with-snapshot)
+          {:keys [store effects]} (store/slice-changed store :deleted {:id :s1})]
+      (is (nil? (get-in store [:slices :s1])))
+      (is (= [{:type :timeline-laid-out :timeline :t1}] effects)))))
+
+(deftest placement-change-triggers-layout-test
+  (testing "rule PlacementChangeTriggersLayout: relayout scoped via placement.slice.timeline"
+    (let [store (store-with-snapshot)
+          {:keys [effects]} (store/placement-changed store :created {:id :p2 :slice :s1 :element :e2})]
+      (is (= [{:type :timeline-laid-out :timeline :t1}] effects))))
+  (testing "on delete, the owning timeline is resolved from the prior entry"
+    (let [store (store-with-snapshot)
+          {:keys [store effects]} (store/placement-changed store :deleted {:id :p1})]
+      (is (nil? (get-in store [:placements :p1])))
+      (is (= [{:type :timeline-laid-out :timeline :t1}] effects)))))
+
+;; == Invalid data + generic dispatch ==========================================
+
+(deftest invalid-data-visible-test
+  (let [store (store-with-snapshot)
+        raw {:entity :unknown-thing :change :created :data {}}
+        {:keys [store effects]} (store/invalid-delta-received store raw)]
+    (is (= store (store-with-snapshot)) "the rest of the store is left intact")
+    (is (= [{:type :invalid-data-indicator-shown :delta raw}] effects))))
+
+(deftest apply-delta-dispatch-test
+  (testing "apply-delta routes to the specific rule by entity/change"
+    (let [store (store-with-snapshot)
+          {:keys [store]} (store/apply-delta store {:entity :slice :change :updated
+                                                     :data (assoc (get-in store [:slices :s1]) :status :done)})]
+      (is (= :done (get-in store [:slices :s1 :status])))))
+  (testing "an unrecognized entity falls through to InvalidDataVisible"
+    (let [store (store-with-snapshot)
+          delta {:entity :not-a-real-entity :change :created :data {}}
+          {:keys [effects]} (store/apply-delta store delta)]
+      (is (= [{:type :invalid-data-indicator-shown :delta delta}] effects)))))
+
+(deftest ingest-delta-defers-while-interacting-test
+  (testing "rule UserInteractionDefers: while interacting, a whole delta batch
+            (one SSE event's changes[]) is queued, not applied"
+    (let [store (assoc-in (store-with-snapshot) [:visualization :interacting] true)
+          change {:entity :slice :change :updated :data (assoc (get-in store [:slices :s1]) :status :in_progress)}
+          changes [change]
+          {:keys [store effects]} (store/ingest-delta store changes)]
+      (is (= [changes] (:delta-queue store)))
+      (is (= [{:type :delta-queued :delta changes}] effects))
+      (is (not= :in_progress (get-in store [:slices :s1 :status])) "not applied while queued")))
+  (testing "when not interacting, the batch is applied immediately via apply-delta-batch"
+    (let [store (store-with-snapshot)
+          change {:entity :slice :change :updated :data (assoc (get-in store [:slices :s1]) :status :in_progress)}
+          {:keys [store]} (store/ingest-delta store [change])]
+      (is (= :in_progress (get-in store [:slices :s1 :status]))))))
+
+(deftest apply-delta-batch-applies-atomically-test
+  (testing "rule set implied by DeleteSwimlane (un-assign elements, then delete the
+            swimlane) and cascading deletes: several changes from one SSE event
+            apply together, in order"
+    (let [store (store-with-snapshot)
+          store (assoc-in store [:elements :e1 :swimlane] :sw1)
+          unassign {:entity :element :change :updated
+                    :data (assoc (get-in store [:elements :e1]) :swimlane nil)}
+          delete-swimlane {:entity :swimlane :change :deleted :data {:id :sw1}}
+          {:keys [store]} (store/apply-delta-batch store [unassign delete-swimlane])]
+      (is (nil? (get-in store [:elements :e1 :swimlane])))
+      (is (nil? (get-in store [:swimlanes :sw1]))))))
+
+(deftest specification-and-spec-step-changed-test
+  (testing "AddSpecification/AddSpecStep etc. aren't covered by a named rule,
+            but still land in the store"
+    (let [store (store-with-snapshot)
+          {:keys [store]} (store/apply-delta store {:entity :specification :change :created
+                                                     :data {:id :spec1 :slice :s1 :title "Happy path"}})
+          {:keys [store]} (store/apply-delta store {:entity :spec-step :change :created
+                                                     :data {:id :step1 :spec :spec1 :clause :given_step
+                                                            :index 0 :is_error false :expect_empty false
+                                                            :examples [] :element :e1 :error_name nil}})]
+      (is (= "Happy path" (get-in store [:specifications :spec1 :title])))
+      (is (= :given_step (get-in store [:spec-steps :step1 :clause])))
+      (let [{:keys [store]} (store/apply-delta store {:entity :specification :change :deleted :data {:id :spec1}})]
+        (is (nil? (get-in store [:specifications :spec1])))))))
+
+;; == Invariants ================================================================
+
+(deftest invariants-hold-after-seeding-test
+  (is (invariants/all-invariants? (store-with-snapshot))))
+
+(deftest invariants-hold-after-element-deletion-test
+  (is (invariants/all-invariants? (:store (store/element-deleted (store-with-snapshot) :e1)))))
+
+(deftest invariants-hold-after-connection-change-test
+  (let [store (store-with-snapshot)
+        store (assoc-in store [:placements :p2] {:id :p2 :slice :s1 :element :e2})]
+    (is (invariants/all-invariants? store))))
+
+(deftest connections-render-right-to-left-detects-a-crossed-pair-test
+  (testing "the invariant predicate genuinely fails on a from-after-to placement,
+            confirming it is not vacuously true"
+    (let [store (store-with-snapshot)
+          store (assoc-in store [:slices :s2] {:id :s2 :timeline :t1 :title "Later" :kind :state_change :status :done :index 5})
+          store (assoc-in store [:placements :p1 :slice] :s2)
+          store (assoc-in store [:placements :p2] {:id :p2 :slice :s1 :element :e2})]
+      (is (not (invariants/connections-render-right-to-left? store))))))

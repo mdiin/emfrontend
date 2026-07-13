@@ -1,0 +1,68 @@
+(ns em-frontend.invariants
+  "spec: `Invariants` section of em-frontend.allium. Pure predicates over a
+   store snapshot -- nothing in the rule functions enforces these yet; they
+   exist so tests (and, if ever needed, a dev-mode assertion pass after
+   applying a delta) can check the store never drifts into a state a
+   correct emcli stream could never have produced."
+  (:require [em-frontend.store :as store]))
+
+(defn placement-within-model?
+  "invariant PlacementWithinModel: an element can only be placed in a slice
+   of a timeline in its own model. The store holds a single EventModel, so
+   every element/timeline necessarily shares it -- what this checks instead
+   is the referential integrity that guarantee rests on: a placement's
+   element and slice (and that slice's timeline) must actually resolve, a
+   correct emcli stream never leaves a placement pointing at nothing."
+  [store-val]
+  (every? (fn [p]
+            (and (contains? (:elements store-val) (:element p))
+                 (contains? (:slices store-val) (:slice p))
+                 (contains? (:timelines store-val) (get-in store-val [:slices (:slice p) :timeline]))))
+          (vals (:placements store-val))))
+
+(defn connection-endpoints-within-model?
+  "invariant ConnectionEndpointsWithinModel: a connection's endpoints must
+   belong to the connection's model. As above, single-model store makes
+   this vacuous; the check still walks every connection so it fails loudly
+   if a from/to id ever resolves to no element at all (a dangling reference
+   a correct stream would never produce)."
+  [store-val]
+  (every? (fn [c]
+            (and (contains? (:elements store-val) (:from c))
+                 (contains? (:elements store-val) (:to c))))
+          (vals (:connections store-val))))
+
+(defn swimlane-within-model?
+  "invariant SwimlaneWithinModel: an element's swimlane, when assigned, must
+   resolve to a swimlane that actually exists in this model."
+  [store-val]
+  (every? (fn [e] (or (nil? (:swimlane e))
+                     (contains? (:swimlanes store-val) (:swimlane e))))
+          (vals (:elements store-val))))
+
+(defn connections-render-right-to-left?
+  "invariant ConnectionsRenderRightToLeft: for every connection, every
+   same-timeline (from-placement, to-placement) pair has to.index >=
+   from.index -- no forward edge. Cross-timeline pairs are unconstrained
+   (they draw no edge at all, see em-frontend.edges)."
+  [store-val]
+  (every?
+    (fn [c]
+      (let [from-placements (map #(store/placement-geometry store-val %)
+                                  (store/placements-of-element store-val (:from c)))
+            to-placements (map #(store/placement-geometry store-val %)
+                                (store/placements-of-element store-val (:to c)))]
+        (every? (fn [pf]
+                  (every? (fn [pt]
+                            (or (not= (:timeline pf) (:timeline pt))
+                                (>= (:index pt) (:index pf))))
+                          to-placements))
+                from-placements)))
+    (vals (:connections store-val))))
+
+(defn all-invariants?
+  [store-val]
+  (and (placement-within-model? store-val)
+       (connection-endpoints-within-model? store-val)
+       (swimlane-within-model? store-val)
+       (connections-render-right-to-left? store-val)))

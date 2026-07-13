@@ -1,0 +1,106 @@
+(ns em-frontend.interaction
+  "spec: rules under `Interaction-deferred delta processing` and `Visual
+   marking and tracing`, plus the actions provided by the Viewport,
+   TimelineFilter and FieldFlowTrace surfaces. Every function here is a pure
+   `store -> {:store :effects}` transform, same shape as em-frontend.store's
+   rule functions."
+  (:require [em-frontend.config :as config]
+            [em-frontend.store :as store]))
+
+(defn- clamp [v lo hi] (max lo (min hi v)))
+
+;; == Gesture begin/end, deferring deltas =====================================
+
+(defn begin-interaction
+  "rule InteractionBegins"
+  [store]
+  (if (false? (get-in store [:visualization :interacting]))
+    {:store (assoc-in store [:visualization :interacting] true) :effects []}
+    {:store store :effects []}))
+
+(defn end-interaction
+  "rule InteractionEnds, chained into InteractionEndFlushesQueue: ending a
+   gesture (interacting becomes false) flushes every deferred delta batch,
+   in commit order, through the same apply-delta-batch each would have used
+   had it not been deferred."
+  [store]
+  (if (true? (get-in store [:visualization :interacting]))
+    (let [cleared (-> store (assoc-in [:visualization :interacting] false) (assoc :delta-queue []))
+          queued (:delta-queue store)]
+      (reduce (fn [{s :store fx :effects} changes]
+                (let [{s' :store fx' :effects} (store/apply-delta-batch s changes)]
+                  {:store s' :effects (into fx fx')}))
+              {:store cleared :effects [{:type :queued-deltas-flushed}]}
+              queued))
+    {:store store :effects []}))
+
+;; == Viewport surface: pan / zoom / resize ===================================
+
+(defn pan
+  "rule ViewportPans: pan_x/pan_y are the cumulative delta from gesture
+   start, not an absolute set. Disabled while a timeline filter is active
+   (the Viewport surface's `when viz.filtered_timeline = null` guard)."
+  [store dx dy]
+  (if (nil? (get-in store [:visualization :filtered_timeline]))
+    {:store (-> store
+                (update-in [:visualization :pan_x] + dx)
+                (update-in [:visualization :pan_y] + dy))
+     :effects []}
+    {:store store :effects []}))
+
+(defn zoom
+  "rule ViewportZooms: multiplicative, clamped to [config/min-zoom, config/max-zoom]."
+  [store factor]
+  {:store (update-in store [:visualization :zoom]
+                      #(clamp (* % factor) config/min-zoom config/max-zoom))
+   :effects []})
+
+(defn resize-viewport
+  "rule ViewportResizes: pure renderer concern, no entity state changes."
+  [store width height]
+  {:store store :effects [{:type :canvas-resized :width width :height height}]})
+
+;; == TimelineFilter surface ===================================================
+
+(defn filter-to-timeline
+  "rule TimelineFilterScopes"
+  [store timeline-id]
+  (let [other-ids (remove #(= % timeline-id) (keys (:timelines store)))]
+    {:store (assoc-in store [:visualization :filtered_timeline] timeline-id)
+     :effects (conj (mapv (fn [tid] {:type :timeline-disappears :timeline tid}) other-ids)
+                    {:type :timeline-appears :timeline timeline-id})}))
+
+(defn clear-timeline-filter
+  "rule TimelineFilterCleared"
+  [store]
+  (if (some? (get-in store [:visualization :filtered_timeline]))
+    {:store (assoc-in store [:visualization :filtered_timeline] nil)
+     :effects (mapv (fn [tid] {:type :timeline-appears :timeline tid}) (keys (:timelines store)))}
+    {:store store :effects []}))
+
+;; == FieldFlowTrace surface ===================================================
+
+(defn select-field-for-trace
+  "rule FieldFlowHighlights: every connection carrying `field-name` forward
+   (source_fields contains it) or backward (target_field matches it) is
+   highlighted; the rest are dimmed. `highlighted_path` records the traced
+   elements -- every from/to endpoint of an on-path connection."
+  [store field-name]
+  (let [connections (vals (:connections store))
+        on-derivation? (fn [d] (or (= (:target_field d) field-name)
+                                   (some #(= % field-name) (:source_fields d))))
+        on-path? (fn [c] (boolean (some on-derivation? (:derivations c))))
+        grouped (group-by on-path? connections)
+        on-path (get grouped true [])
+        off-path (get grouped false [])
+        path-elements (into #{} (mapcat (fn [c] [(:from c) (:to c)])) on-path)]
+    {:store (assoc-in store [:visualization :highlighted_path] path-elements)
+     :effects (into (mapv (fn [c] {:type :connection-highlighted :connection (:id c)}) on-path)
+                    (map (fn [c] {:type :connection-dimmed :connection (:id c)}))
+                    off-path)}))
+
+(defn clear-field-flow-trace
+  "The FieldFlowTrace surface's only other provided action; no separate
+   named rule covers it beyond resetting the trace FieldFlowHighlights set."
+  [store]
+  {:store (assoc-in store [:visualization :highlighted_path] #{}) :effects []})

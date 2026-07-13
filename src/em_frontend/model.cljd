@@ -1,0 +1,52 @@
+(ns em-frontend.model
+  "Domain shapes and pure derived values from em-frontend.allium's
+   `Entities and Variants` and `Value Types` sections.
+
+   Entities are plain maps keyed by keyword; no defrecord/deftype is used
+   because the store (em-frontend.store) indexes everything by id in a
+   normalized map-of-maps and these values are never passed to Dart APIs
+   directly. Enum values are keywords matching the spec's enum members
+   (e.g. FieldType.string -> :string, ElementKind.read_model -> :read_model).")
+
+;; entity Field { name type optional cardinality subfields }
+;; entity FieldDerivation { target_field source_fields }
+;; entity FieldOrigin { field origin }
+;; entity Example { field_name field_value }
+;; These are carried verbatim as maps; no derivation needed on them.
+
+;; canvas_fields is shown only for these ElementKinds (command, event, read_model);
+;; screen shows an image thumbnail, automation has no fields of its own.
+(def canvas-field-kinds #{:command :event :read_model})
+
+(defn origin-field-names
+  "entity Element .origin_field_names: field_origins -> field"
+  [element]
+  (into #{} (map :field) (:field_origins element)))
+
+(defn derived-field-names
+  "entity Element .derived_field_names: incoming.derivations -> target_field
+   `incoming` is this element's incoming Connections, resolved by the caller
+   from the store (see em-frontend.store/incoming-connections)."
+  [incoming-connections]
+  (into #{}
+        (comp (mapcat :derivations) (map :target_field))
+        incoming-connections))
+
+(defn unsourced-fields
+  "entity Element .unsourced_fields: fields where name not in
+   origin_field_names and name not in derived_field_names.
+   These are exactly the fields the IncompleteTooltip surface lists."
+  [element incoming-connections]
+  (let [origins (origin-field-names element)
+        derived (derived-field-names incoming-connections)]
+    (into [] (remove #(or (contains? origins (:name %))
+                           (contains? derived (:name %))))
+          (:fields element))))
+
+(defn canvas-fields
+  "entity Element .canvas_fields: if kind in {command, event, read_model}:
+   fields else: {}"
+  [element]
+  (if (contains? canvas-field-kinds (:kind element))
+    (:fields element)
+    []))

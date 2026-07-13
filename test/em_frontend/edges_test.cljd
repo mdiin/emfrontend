@@ -1,0 +1,78 @@
+(ns em-frontend.edges-test
+  "spec: the nearest-placement predicate documented at length on rule
+   ConnectionChangeRelaysOut, and the ConnectionsRenderRightToLeft
+   invariant it renders on top of."
+  (:require [cljd.test :refer [deftest is testing]]
+            [em-frontend.edges :as edges]))
+
+(defn- p [id timeline index] {:placement-id id :timeline timeline :index index})
+
+(deftest cross-timeline-pairs-draw-nothing-test
+  (testing "a from/to placement pair in different timelines yields no drawn edge"
+    (is (= [] (edges/drawn-edges [(p :pf1 :t1 0)] [(p :pt1 :t2 1)])))))
+
+(deftest single-pair-draws-test
+  (testing "a lone valid from/to pair in the same timeline always draws"
+    (is (= [{:from :pf1 :to :pt1 :timeline :t1}]
+           (edges/drawn-edges [(p :pf1 :t1 0)] [(p :pt1 :t1 2)])))))
+
+(deftest same-column-pair-draws-test
+  (testing "equal-index pairs are geometrically valid (not forward) and draw"
+    (is (= [{:from :pf1 :to :pt1 :timeline :t1}]
+           (edges/drawn-edges [(p :pf1 :t1 1)] [(p :pt1 :t1 1)])))))
+
+(deftest nearer-from-disqualifies-stale-from-test
+  (testing "a closer from-placement (strictly between, or landing on pt's column) wins;
+            the stale, farther-left from is disqualified"
+    (let [from [(p :pf-far :t1 0) (p :pf-near :t1 3)]
+          to [(p :pt :t1 5)]]
+      (is (= [{:from :pf-near :to :pt :timeline :t1}]
+             (edges/drawn-edges from to)))))
+  (testing "same-column from-placements are a tie, not nearer -- neither disqualifies the other,
+            so both draw to the same to"
+    (let [from [(p :pf-a :t1 2) (p :pf-b :t1 2)]
+          to [(p :pt :t1 5)]]
+      (is (= #{:pf-a :pf-b}
+             (into #{} (map :from) (edges/drawn-edges from to)))))))
+
+(deftest nearer-to-disqualifies-stale-to-test
+  (testing "a closer to-placement (landing on pf's column, or strictly between) wins;
+            the stale, farther-right to is disqualified"
+    (let [from [(p :pf :t1 0)]
+          to [(p :pt-near :t1 2) (p :pt-far :t1 6)]]
+      (is (= [{:from :pf :to :pt-near :timeline :t1}]
+             (edges/drawn-edges from to)))))
+  (testing "same-column to-placements are a tie -- both draw from the same pf"
+    (let [from [(p :pf :t1 0)]
+          to [(p :pt-a :t1 4) (p :pt-b :t1 4)]]
+      (is (= #{:pt-a :pt-b}
+             (into #{} (map :to) (edges/drawn-edges from to)))))))
+
+(deftest multiplicity-within-one-timeline-via-ties-test
+  (testing "an element placed twice at the same column (a duplicate/informational slice
+            repeating an earlier pair) draws independently for every tied combination,
+            since same-column placements never disqualify one another"
+    (let [from [(p :pf1 :t1 0) (p :pf2 :t1 0)]
+          to [(p :pt1 :t1 1) (p :pt2 :t1 1)]]
+      (is (= #{[:pf1 :pt1] [:pf1 :pt2] [:pf2 :pt1] [:pf2 :pt2]}
+             (into #{} (map (juxt :from :to)) (edges/drawn-edges from to)))))))
+
+(deftest predicate-does-not-itself-enforce-right-to-left-test
+  (testing "ConnectionsRenderRightToLeft (to.index >= from.index for every same-timeline
+            pair) is a separate invariant the spec deliberately does NOT fold into this
+            rendering predicate -- a from-placement sitting after its to-placement is
+            never disqualified by nearer-from?/nearer-to? (their windows go empty, not
+            true), so it still draws. Valid emcli data never produces this; a from/to
+            pair this 'crossed' would fail em-frontend.invariants/connections-render-right-to-left?"
+    (is (= [{:from :pf :to :pt :timeline :t1}]
+           (edges/drawn-edges [(p :pf :t1 5)] [(p :pt :t1 1)])))))
+
+(deftest multiplicity-across-timelines-test
+  (testing "the same connection can draw independently in every timeline that holds
+            a matching same-timeline pair"
+    (let [from [(p :pf1 :t1 0) (p :pf2 :t2 0)]
+          to [(p :pt1 :t1 1) (p :pt2 :t2 1)]]
+      (is (= #{:t1 :t2} (edges/timelines-to-relayout from to))))))
+
+(deftest no-matching-pair-yields-no-relayout-test
+  (is (= #{} (edges/timelines-to-relayout [(p :pf :t1 0)] []))))

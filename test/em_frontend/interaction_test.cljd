@@ -1,0 +1,144 @@
+(ns em-frontend.interaction-test
+  "spec: rules under `Interaction-deferred delta processing` and `Visual
+   marking and tracing`, plus the Viewport/TimelineFilter/FieldFlowTrace
+   surfaces' provided actions."
+  (:require [cljd.test :refer [deftest is testing]]
+            [em-frontend.config :as config]
+            [em-frontend.store :as store]
+            [em-frontend.interaction :as interaction]))
+
+(defn- base-store []
+  {:event-model {:id :m1 :name "Checkout"}
+   :timelines {:t1 {:id :t1 :title "Checkout"} :t2 {:id :t2 :title "Fulfilment"}}
+   :swimlanes {} :slices {} :placements {}
+   :elements {:e1 {:id :e1 :name "A"} :e2 {:id :e2 :name "B"} :e3 {:id :e3 :name "C"}}
+   :connections {:c1 {:id :c1 :from :e1 :to :e2 :derivations [{:target_field "x" :source_fields ["y"]}]}
+                 :c2 {:id :c2 :from :e2 :to :e3 :derivations [{:target_field "z" :source_fields ["w"]}]}}
+   :specifications {} :spec-steps {}
+   :visualization {:state :rendered :zoom 1.0 :pan_x 0.0 :pan_y 0.0
+                   :filtered_timeline nil :interacting false :highlighted_path #{}}
+   :sse-connection {:state :connected}
+   :delta-queue []})
+
+;; == Gesture begin/end + deferred-delta flush =================================
+
+(deftest interaction-begins-test
+  (testing "rule InteractionBegins: requires interacting = false"
+    (let [{:keys [store]} (interaction/begin-interaction (base-store))]
+      (is (true? (get-in store [:visualization :interacting]))))))
+
+(deftest interaction-begins-noop-when-already-interacting-test
+  (let [already (assoc-in (base-store) [:visualization :interacting] true)
+        {:keys [store]} (interaction/begin-interaction already)]
+    (is (= already store))))
+
+(deftest interaction-ends-flushes-queue-in-order-test
+  (testing "rule InteractionEnds + InteractionEndFlushesQueue: queued delta
+            batches apply, in commit order, through the same apply-delta-batch"
+    (let [d1 {:entity :slice :change :created :data {:id :s1 :timeline :t1 :title "S1" :kind :state_change :status :done :index 0}}
+          d2 {:entity :slice :change :updated :data {:id :s1 :timeline :t1 :title "S1 renamed" :kind :state_change :status :done :index 0}}
+          store (-> (base-store)
+                    (assoc-in [:visualization :interacting] true)
+                    (assoc :delta-queue [[d1] [d2]]))
+          {:keys [store effects]} (interaction/end-interaction store)]
+      (is (false? (get-in store [:visualization :interacting])))
+      (is (= [] (:delta-queue store)))
+      (is (= "S1 renamed" (get-in store [:slices :s1 :title])) "d1 then d2 applied in order")
+      (is (some #(= :queued-deltas-flushed (:type %)) effects))))
+  (testing "a multi-change batch (e.g. DeleteSwimlane's un-assign-then-delete)
+            applies as one unit"
+    (let [batch [{:entity :element :change :updated :data {:id :e1 :name "A" :swimlane nil}}
+                 {:entity :swimlane :change :deleted :data {:id :sw1}}]
+          store (-> (base-store)
+                    (assoc-in [:visualization :interacting] true)
+                    (assoc-in [:swimlanes :sw1] {:id :sw1 :name "Sales"})
+                    (assoc :delta-queue [batch]))
+          {:keys [store]} (interaction/end-interaction store)]
+      (is (nil? (get-in store [:elements :e1 :swimlane])))
+      (is (nil? (get-in store [:swimlanes :sw1]))))))
+
+(deftest interaction-ends-noop-when-not-interacting-test
+  (let [store (base-store)
+        {:keys [store effects]} (interaction/end-interaction store)]
+    (is (= (base-store) store))
+    (is (= [] effects))))
+
+;; == Viewport: pan / zoom / resize ============================================
+
+(deftest viewport-pans-test
+  (testing "rule ViewportPans: cumulative delta, not an absolute set"
+    (let [store (assoc-in (base-store) [:visualization :pan_x] 10.0)
+          {:keys [store]} (interaction/pan store 5.0 -3.0)]
+      (is (= 15.0 (get-in store [:visualization :pan_x])))
+      (is (= -3.0 (get-in store [:visualization :pan_y]))))))
+
+(deftest viewport-pan-disabled-when-filtered-test
+  (testing "Viewport surface: Pan(...) when viz.filtered_timeline = null -- disabled while filtered"
+    (let [store (assoc-in (base-store) [:visualization :filtered_timeline] :t1)
+          {:keys [store]} (interaction/pan store 5.0 5.0)]
+      (is (= 0.0 (get-in store [:visualization :pan_x]))))))
+
+(deftest viewport-zooms-clamped-test
+  (testing "rule ViewportZooms: multiplicative, clamped to [config/min-zoom, config/max-zoom]"
+    (let [{:keys [store]} (interaction/zoom (base-store) 2.0)]
+      (is (= 2.0 (get-in store [:visualization :zoom]))))
+    (testing "clamped at the top"
+      (let [store (assoc-in (base-store) [:visualization :zoom] 4.0)
+            {:keys [store]} (interaction/zoom store 10.0)]
+        (is (= config/max-zoom (get-in store [:visualization :zoom])))))
+    (testing "clamped at the bottom"
+      (let [store (assoc-in (base-store) [:visualization :zoom] 0.2)
+            {:keys [store]} (interaction/zoom store 0.01)]
+        (is (= config/min-zoom (get-in store [:visualization :zoom])))))))
+
+(deftest viewport-resizes-is-a-pure-render-effect-test
+  (testing "rule ViewportResizes: no entity state changes, only CanvasResized"
+    (let [store (base-store)
+          {:keys [store effects]} (interaction/resize-viewport store 800.0 600.0)]
+      (is (= store (base-store)))
+      (is (= [{:type :canvas-resized :width 800.0 :height 600.0}] effects)))))
+
+;; == TimelineFilter surface ====================================================
+
+(deftest timeline-filter-scopes-test
+  (testing "rule TimelineFilterScopes: hides every other timeline, shows the selected one"
+    (let [{:keys [store effects]} (interaction/filter-to-timeline (base-store) :t1)]
+      (is (= :t1 (get-in store [:visualization :filtered_timeline])))
+      (is (some #(and (= :timeline-disappears (:type %)) (= :t2 (:timeline %))) effects))
+      (is (some #(and (= :timeline-appears (:type %)) (= :t1 (:timeline %))) effects))
+      (is (not (some #(and (= :timeline-disappears (:type %)) (= :t1 (:timeline %))) effects))
+          "the newly-filtered timeline itself never gets a Disappears"))))
+
+(deftest timeline-filter-cleared-test
+  (testing "rule TimelineFilterCleared: restores every timeline, each animates back in"
+    (let [store (assoc-in (base-store) [:visualization :filtered_timeline] :t1)
+          {:keys [store effects]} (interaction/clear-timeline-filter store)]
+      (is (nil? (get-in store [:visualization :filtered_timeline])))
+      (is (= #{:t1 :t2} (into #{} (map :timeline) effects)))
+      (is (every? #(= :timeline-appears (:type %)) effects))))
+  (testing "no-op when no filter is active"
+    (let [store (base-store)
+          {:keys [store effects]} (interaction/clear-timeline-filter store)]
+      (is (= store (base-store)))
+      (is (= [] effects)))))
+
+;; == FieldFlowTrace surface ====================================================
+
+(deftest field-flow-highlights-test
+  (testing "rule FieldFlowHighlights: connections carrying the field forward or
+            backward are highlighted, the rest dimmed; highlighted_path
+            records every on-path connection's endpoints"
+    (let [{:keys [store effects]} (interaction/select-field-for-trace (base-store) "x")]
+      (is (= #{:e1 :e2} (get-in store [:visualization :highlighted_path])))
+      (is (some #(and (= :connection-highlighted (:type %)) (= :c1 (:connection %))) effects))
+      (is (some #(and (= :connection-dimmed (:type %)) (= :c2 (:connection %))) effects))))
+  (testing "a field carried by no connection's derivations highlights nothing, dims everything"
+    (let [{:keys [store effects]} (interaction/select-field-for-trace (base-store) "no-such-field")]
+      (is (= #{} (get-in store [:visualization :highlighted_path])))
+      (is (every? #(= :connection-dimmed (:type %)) effects))
+      (is (= 2 (count effects))))))
+
+(deftest clear-field-flow-trace-test
+  (let [store (assoc-in (base-store) [:visualization :highlighted_path] #{:e1 :e2})
+        {:keys [store]} (interaction/clear-field-flow-trace store)]
+    (is (= #{} (get-in store [:visualization :highlighted_path])))))

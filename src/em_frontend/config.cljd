@@ -1,0 +1,11 @@
+(ns em-frontend.config
+  "spec: config { ... }")
+
+;; Zoom/pan seeded on first load, before any user interaction (config.default_*),
+;; and the hard zoom boundaries enforced on every zoom gesture (config.min/max_zoom).
+(def default-zoom 1.0)
+(def default-pan-x 0.0)
+(def default-pan-y 0.0)
+
+(def min-zoom 0.1)
+(def max-zoom 5.0)

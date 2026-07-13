@@ -1,0 +1,296 @@
+(ns em-frontend.stream
+  "spec: contract ChangeStream (`connect`, `next_delta`) demanded by the
+   StreamIngest surface, plus SSEConnection's `transitions state {}` block
+   (connecting -> connected -> reconnecting -> connected/error).
+
+   Wire format: this is the one adapter boundary translating emcli's actual
+   `GET /stream` SSE schema (../thecli/docs/change-stream.md) into the
+   internal normalized shapes em-frontend.store expects.
+
+   - Each SSE event's `data:` line is one JSON object. The first event of a
+     (re)connection is `{\"op\":\"snapshot\",\"model\":{...}}` (exactly
+     once); every event after that is a delta `{\"op\":<OpName>,
+     \"changes\":[{\"action\",\"type\",\"id\",\"entity\"?}, ...]}` -- more
+     than one change per event for a cascading delete or DeleteSwimlane's
+     un-assign-then-delete, applied atomically.
+   - The snapshot's `model` is a NESTED projection: timelines nest slices,
+     slices nest placements (each with a full embedded `element`) and
+     specifications (each with `steps[]`); swimlanes and connections are
+     flat top-level lists, but a connection's `from`/`to` are partial
+     embedded `{id, name}` objects, not bare ids. A delta's `entity` is
+     always the FLAT canonical record (foreign keys as bare ids) --
+     `normalize-snapshot` and the entity-normalizers below deliberately
+     differ on `from`/`to`/`element` shape for exactly this reason.
+   - `SetConnectionDerivations` is the only op that ever updates (rather
+     than creates/deletes) a connection, so `type=connection, action=updated`
+     unambiguously means ConnectionDerivationsRerenders, never
+     ConnectionChangeRelaysOut -- see the `:connection-derivations` special
+     case in `normalize-change`."
+  (:require ["package:http/http.dart" :as http]
+            ["dart:convert" :as convert]
+            ["dart:async" :as async]
+            ["dart:math" :as math]))
+
+(def ^:private initial-backoff-ms 500)
+(def ^:private max-backoff-ms 30000)
+(def ^:private max-attempts 8) ;; reconnecting -> error once exhausted
+
+;; == Wire -> internal normalization ==========================================
+;; `get` on a decoded JSON payload works directly against its Dart
+;; Map<String, dynamic> with string keys (see samples/fetch-data).
+
+(defn- norm-field [m]
+  {:name (get m "name")
+   :type (keyword (get m "type"))
+   :optional (get m "optional")
+   :cardinality (keyword (get m "cardinality"))
+   :subfields (mapv norm-field (or (get m "subfields") []))})
+
+(defn- norm-field-origin [m]
+  {:field (get m "field") :origin (keyword (get m "origin"))})
+
+(defn- norm-field-derivation [m]
+  {:target_field (get m "target_field") :source_fields (vec (get m "source_fields"))})
+
+(defn- norm-example [m]
+  {:field_name (get m "field_name") :field_value (get m "field_value")})
+
+(defn- norm-element
+  "Handles both shapes: a delta's flat canonical element entity (context,
+   field_origins, image_url always present when set) and the snapshot's
+   reduced embedded element (id, name, kind, swimlane, is_information_complete,
+   fields only -- context/field_origins/image_url are simply absent until a
+   later delta fills them in; `get` on a missing key is nil either way)."
+  [m]
+  {:id (get m "id")
+   :name (get m "name")
+   :kind (keyword (get m "kind"))
+   :context (keyword (get m "context"))
+   :is_information_complete (get m "is_information_complete")
+   :fields (mapv norm-field (or (get m "fields") []))
+   :field_origins (mapv norm-field-origin (or (get m "field_origins") []))
+   :swimlane (get m "swimlane")
+   :image_url (get m "image_url")})
+
+(defn- norm-connection-delta
+  "A delta's connection entity: `from`/`to` are already bare ids."
+  [m]
+  {:id (get m "id")
+   :from (get m "from")
+   :to (get m "to")
+   :derivations (mapv norm-field-derivation (or (get m "derivations") []))})
+
+(defn- norm-swimlane [m]
+  {:id (get m "id") :name (get m "name")})
+
+(defn- norm-spec-step [m spec-id]
+  {:id (get m "id")
+   :spec spec-id
+   :clause (keyword (get m "clause"))
+   :index (get m "index")
+   :is_error (get m "is_error")
+   :expect_empty (get m "expect_empty")
+   :examples (mapv norm-example (or (get m "examples") []))
+   :element (get m "element")
+   :error_name (get m "error_name")})
+
+(defn- norm-specification [m slice-id spec-steps!]
+  (let [id (get m "id")
+        steps (mapv #(norm-spec-step % id) (or (get m "steps") []))]
+    (doseq [s steps] (swap! spec-steps! assoc (:id s) s))
+    {:id id :slice slice-id :title (get m "title")}))
+
+(defn- norm-placement
+  "A snapshot placement embeds its element in full; register it into the
+   elements index being built (a later connection referencing the same
+   element only ever contributes a partial {id,name}, so this, being fuller,
+   must win -- see the merge in norm-connection-snapshot)."
+  [m slice-id elements!]
+  (let [el (norm-element (get m "element"))]
+    (swap! elements! assoc (:id el) el)
+    {:id (get m "id") :slice slice-id :element (:id el)}))
+
+(defn- norm-slice [m timeline-id placements! specifications! spec-steps! elements!]
+  (let [id (get m "id")
+        placements (mapv #(norm-placement % id elements!) (or (get m "placements") []))
+        specs (mapv #(norm-specification % id spec-steps!) (or (get m "specifications") []))]
+    (doseq [p placements] (swap! placements! assoc (:id p) p))
+    (doseq [s specs] (swap! specifications! assoc (:id s) s))
+    {:id id
+     :timeline timeline-id
+     :title (get m "title")
+     :kind (keyword (get m "kind"))
+     :status (keyword (get m "status"))
+     :index (get m "index")}))
+
+(defn- norm-timeline [m slices! placements! specifications! spec-steps! elements!]
+  (let [id (get m "id")
+        slices (mapv #(norm-slice % id placements! specifications! spec-steps! elements!) (or (get m "slices") []))]
+    (doseq [s slices] (swap! slices! assoc (:id s) s))
+    {:id id :title (get m "title")}))
+
+(defn- norm-connection-snapshot
+  "A snapshot connection's `from`/`to` are partial embedded {id,name}
+   objects; register that partial record into the elements index only if
+   the placement walk above hasn't already contributed the fuller entity."
+  [m elements!]
+  (let [from-m (get m "from") to-m (get m "to")
+        from-id (get from-m "id") to-id (get to-m "id")]
+    (swap! elements! update from-id #(merge {:id from-id :name (get from-m "name")} %))
+    (swap! elements! update to-id #(merge {:id to-id :name (get to-m "name")} %))
+    {:id (get m "id") :from from-id :to to-id
+     :derivations (mapv norm-field-derivation (or (get m "derivations") []))}))
+
+(defn- index-by-id [normalize coll]
+  (into {} (map (fn [m] (let [v (normalize m)] [(:id v) v]))) (or coll [])))
+
+(defn normalize-snapshot
+  "Raw JSON string (the `snapshot` SSE event's `data:` payload) -> the flat,
+   id-indexed shape em-frontend.store/snapshot-received expects. Timelines
+   (and everything they nest) are walked before connections, so that a
+   placement's full embedded element always wins over a connection's
+   partial one for the same id."
+  [raw-json]
+  (let [m (get (convert/json.decode raw-json) "model")
+        slices! (atom {}) placements! (atom {})
+        specifications! (atom {}) spec-steps! (atom {}) elements! (atom {})
+        timelines (index-by-id
+                    #(norm-timeline % slices! placements! specifications! spec-steps! elements!)
+                    (get m "timelines"))
+        connections (index-by-id #(norm-connection-snapshot % elements!) (get m "connections"))]
+    {:model {:id (get m "id") :name (get m "name")}
+     :timelines timelines
+     :slices @slices!
+     :placements @placements!
+     :specifications @specifications!
+     :spec-steps @spec-steps!
+     :elements @elements!
+     :connections connections
+     :swimlanes (index-by-id norm-swimlane (get m "swimlanes"))}))
+
+;; == Delta events =============================================================
+;; entity-normalizers turn a change's flat canonical `entity` into the
+;; internal shape; wire `type` strings map 1:1 to store.cljd's dispatch
+;; keywords, connection excepted (see normalize-change).
+
+(def ^:private entity-normalizers
+  {"element" norm-element
+   "connection" norm-connection-delta
+   "timeline" (fn [m] {:id (get m "id") :title (get m "title")})
+   "swimlane" norm-swimlane
+   "slice" (fn [m] {:id (get m "id") :timeline (get m "timeline") :title (get m "title")
+                    :kind (keyword (get m "kind")) :status (keyword (get m "status"))
+                    :index (get m "index")})
+   "placement" (fn [m] {:id (get m "id") :slice (get m "slice") :element (get m "element")})
+   "specification" (fn [m] {:id (get m "id") :slice (get m "slice") :title (get m "title")})
+   "spec-step" (fn [m] (norm-spec-step m (get m "spec")))})
+
+(defn- normalize-change
+  "One entry of a delta's `changes[]` array -> {:entity :change :data}, or
+   nil if its `type` isn't recognized (rule InvalidDataVisible)."
+  [c]
+  (let [action (get c "action")
+        type (get c "type")
+        id (get c "id")
+        normalize (get entity-normalizers type)]
+    (when normalize
+      {:entity (if (and (= type "connection") (= action "updated"))
+                 :connection-derivations
+                 (keyword type))
+       :change (keyword action)
+       :data (if (= action "deleted") {:id id} (normalize (get c "entity")))})))
+
+(defn normalize-changes
+  "Raw JSON string (a delta SSE event's `data:` payload) -> a vector of
+   {:entity :change :data} maps, one per entry in `changes` -- a cascading
+   delete or DeleteSwimlane's un-assign-then-delete both arrive as several
+   changes in ONE event, meant to be applied atomically (see
+   em-frontend.store/apply-delta-batch). Returns nil if the payload doesn't
+   parse or any one change fails to normalize (rule InvalidDataVisible)."
+  [raw-json]
+  (try
+    (let [changes (get (convert/json.decode raw-json) "changes")]
+      (when (seq changes)
+        (let [normalized (mapv normalize-change changes)]
+          (when (every? some? normalized)
+            normalized))))
+    (catch Object _ nil)))
+
+;; == SSE line framing =========================================================
+
+(defn- sse-payloads
+  "Stream<String> of decoded text lines -> Stream<String> of joined `data:`
+   payloads, one per blank-line-terminated SSE event (multi-line `data:`
+   fields are joined with a newline, per the SSE spec)."
+  [^#/(async/Stream String) lines]
+  (let [controller (async/StreamController)
+        buffer (atom "")]
+    (.listen lines
+      (fn [^String line]
+        (cond
+          (.startsWith line "data:")
+          (swap! buffer str (if (.startsWith line "data: ") (.substring line 6) (.substring line 5)) "\n")
+
+          (.-isEmpty line)
+          (when (seq @buffer)
+            (.add controller @buffer)
+            (reset! buffer ""))
+
+          :else nil))
+      .onDone (fn [] (.close controller) nil)
+      .onError (fn [e] (.addError controller e) nil))
+    (.-stream controller)))
+
+;; == Connection lifecycle with reconnect backoff =============================
+
+(defn- ^double backoff-ms [attempt]
+  (.toDouble (min max-backoff-ms (* initial-backoff-ms (math/pow 2 attempt)))))
+
+(defn ^:async connect!
+  "Opens `stream-url` and drives it forever, reconnecting with exponential
+   backoff on drop, per SSEConnection's transitions state {} block. Calls:
+     (on-sse-state kw)      every SSEConnection state change
+     (on-snapshot seed)     the first payload of every (re)connection
+     (on-delta changes)     every subsequent delta, as a vector of
+                            {:entity :change :data} changes to apply atomically
+     (on-invalid raw)       a payload that failed to parse/validate
+   Never returns under normal operation; only settles once the state
+   reaches the terminal :error (max-attempts exhausted)."
+  [stream-url on-sse-state on-snapshot on-delta on-invalid]
+  (loop [attempt 0 first-event? true]
+    (on-sse-state (if (zero? attempt) :connecting :reconnecting))
+    (let [outcome
+          (try
+            (let [client (http/Client)
+                  request (http/Request "GET" (Uri/parse stream-url))
+                  ^http/StreamedResponse response (await (.send client request))
+                  lines (-> (.-stream response)
+                            (.transform (.-decoder convert/utf8))
+                            (.transform (convert/LineSplitter)))
+                  payloads (sse-payloads lines)
+                  first? (atom first-event?)
+                  done (async/Completer)]
+              (on-sse-state :connected)
+              (.listen payloads
+                (fn [^String raw]
+                  (if @first?
+                    (do (reset! first? false) (on-snapshot (normalize-snapshot raw)))
+                    (if-some [changes (normalize-changes raw)]
+                      (on-delta changes)
+                      (on-invalid raw))))
+                .onDone (fn [] (.complete done nil))
+                .onError (fn [e] (.complete done nil)))
+              (await (.-future done))
+              :dropped)
+            (catch Object _ :failed))]
+      (when (= outcome :dropped)
+        ;; A clean stream end still means the connection was lost; keep
+        ;; retrying rather than settling, so :error stays reachable only
+        ;; through repeated failure (reconnecting -> error is terminal).
+        nil)
+      (let [next-attempt (inc attempt)]
+        (if (>= next-attempt max-attempts)
+          (on-sse-state :error)
+          (do
+            (await (Future/delayed (Duration .milliseconds (.round (backoff-ms attempt)))))
+            (recur next-attempt false)))))))

@@ -1,0 +1,92 @@
+(ns em-frontend.stream-test
+  "spec: contract ChangeStream. Fixtures below are byte-for-byte payloads --
+   the snapshot captured live from a running `emcli serve`, the deltas taken
+   verbatim from ../thecli/docs/change-stream.md's own worked examples --
+   so this test is the guard against wire-schema drift, not a re-statement
+   of my own assumptions."
+  (:require [cljd.test :refer [deftest is testing]]
+            [em-frontend.stream :as stream]))
+
+;; Captured live from `emcli serve --port 8090` after authoring one timeline,
+;; one slice, two placed+connected elements (one with an unsourced field,
+;; hence is_information_complete=false), and one swimlane assignment.
+(def real-snapshot
+  "{\"op\":\"snapshot\",\"model\":{\"id\":1,\"name\":\"model\",\"timelines\":[{\"id\":3,\"title\":\"Foobar\",\"slices\":[{\"id\":7,\"title\":\"Place order\",\"kind\":\"state_change\",\"status\":\"created\",\"index\":0,\"is_complete\":true,\"placements\":[{\"id\":10,\"index\":0,\"element\":{\"id\":8,\"name\":\"PlaceOrder\",\"kind\":\"command\",\"swimlane\":13,\"is_information_complete\":false,\"fields\":[{\"name\":\"orderId\",\"type\":\"uuid\"},{\"name\":\"amount\",\"type\":\"decimal\"}]}},{\"id\":11,\"index\":1,\"element\":{\"id\":9,\"name\":\"OrderPlaced\",\"kind\":\"event\",\"swimlane\":null,\"is_information_complete\":true,\"fields\":[{\"name\":\"orderId\",\"type\":\"uuid\"},{\"name\":\"total\",\"type\":\"decimal\"}]}}],\"specifications\":[]}]}],\"swimlanes\":[{\"id\":13,\"name\":\"Sales\",\"index\":0}],\"connections\":[{\"id\":12,\"from\":{\"id\":8,\"name\":\"PlaceOrder\"},\"to\":{\"id\":9,\"name\":\"OrderPlaced\"},\"derivations\":[{\"target_field\":\"total\",\"source_fields\":[\"amount\"]}]}]}}")
+
+(deftest normalize-real-snapshot-test
+  (let [seed (stream/normalize-snapshot real-snapshot)]
+    (testing "model, timeline, slice"
+      (is (= {:id 1 :name "model"} (:model seed)))
+      (is (= "Foobar" (get-in seed [:timelines 3 :title])))
+      (is (= 3 (get-in seed [:slices 7 :timeline])))
+      (is (= :state_change (get-in seed [:slices 7 :kind]))))
+    (testing "placements resolve to element ids, not embedded objects"
+      (is (= 8 (get-in seed [:placements 10 :element])))
+      (is (= 9 (get-in seed [:placements 11 :element]))))
+    (testing "the placement-embedded element is fully populated, including
+              the false is_information_complete a missing field origin causes"
+      (is (= "PlaceOrder" (get-in seed [:elements 8 :name])))
+      (is (= :command (get-in seed [:elements 8 :kind])))
+      (is (false? (get-in seed [:elements 8 :is_information_complete])))
+      (is (= 13 (get-in seed [:elements 8 :swimlane])))
+      (is (= 2 (count (get-in seed [:elements 8 :fields])))))
+    (testing "swimlane"
+      (is (= "Sales" (get-in seed [:swimlanes 13 :name]))))
+    (testing "connection: from/to resolved to bare element ids from the
+              partial embedded {id,name}, derivations intact"
+      (is (= 8 (get-in seed [:connections 12 :from])))
+      (is (= 9 (get-in seed [:connections 12 :to])))
+      (is (= [{:target_field "total" :source_fields ["amount"]}]
+             (get-in seed [:connections 12 :derivations]))))))
+
+;; From change-stream.md's own worked examples, verbatim.
+(def delta-create-element
+  "{\"op\":\"CreateElement\",\"changes\":[{\"action\":\"created\",\"type\":\"element\",\"id\":5,\"entity\":{\"model\":1,\"name\":\"PlaceOrder\",\"kind\":\"command\",\"context\":\"internal\",\"fields\":[],\"id\":5,\"type\":\"element\"}}]}")
+
+(def delta-set-image-url
+  "{\"op\":\"SetImageUrl\",\"changes\":[{\"action\":\"updated\",\"type\":\"element\",\"id\":4,\"entity\":{\"model\":1,\"name\":\"OrderScreen\",\"kind\":\"screen\",\"context\":\"internal\",\"fields\":[{\"name\":\"id\",\"type\":\"uuid\",\"optional\":false,\"cardinality\":\"single\",\"subfields\":[]}],\"image_url\":\"http://x/s.png\",\"id\":4,\"type\":\"element\"}}]}")
+
+(def delta-cascading-delete-timeline
+  "{\"op\":\"DeleteTimeline\",\"changes\":[{\"action\":\"deleted\",\"type\":\"placement\",\"id\":7},{\"action\":\"deleted\",\"type\":\"spec-step\",\"id\":10},{\"action\":\"deleted\",\"type\":\"spec-step\",\"id\":11},{\"action\":\"deleted\",\"type\":\"specification\",\"id\":9},{\"action\":\"deleted\",\"type\":\"slice\",\"id\":4},{\"action\":\"deleted\",\"type\":\"timeline\",\"id\":3}]}")
+
+(deftest normalize-create-element-delta-test
+  (let [changes (stream/normalize-changes delta-create-element)]
+    (is (= 1 (count changes)))
+    (is (= {:entity :element :change :created
+            :data {:id 5 :name "PlaceOrder" :kind :command :context :internal
+                   :is_information_complete nil :fields [] :field_origins []
+                   :swimlane nil :image_url nil}}
+           (first changes)))))
+
+(deftest normalize-updated-element-delta-test
+  (let [changes (stream/normalize-changes delta-set-image-url)]
+    (is (= :updated (:change (first changes))))
+    (is (= "http://x/s.png" (get-in (first changes) [:data :image_url])))
+    (is (= :screen (get-in (first changes) [:data :kind])))))
+
+(deftest normalize-cascading-delete-test
+  (testing "one delta, many changes, applied in leaves-first order -- every
+            change normalizes even though deleted changes carry only an id"
+    (let [changes (stream/normalize-changes delta-cascading-delete-timeline)]
+      (is (= 6 (count changes)))
+      (is (= [:placement :spec-step :spec-step :specification :slice :timeline]
+             (mapv :entity changes)))
+      (is (every? #(= :deleted (:change %)) changes))
+      (is (every? #(= 1 (count (:data %))) changes) "delete changes carry only :id"))))
+
+(deftest connection-update-is-derivations-not-changed-test
+  (testing "SetConnectionDerivations is the only op that updates (not
+            creates/deletes) a connection, so type=connection+action=updated
+            unambiguously means ConnectionDerivationsRerenders"
+    (let [raw "{\"op\":\"SetConnectionDerivations\",\"changes\":[{\"action\":\"updated\",\"type\":\"connection\",\"id\":12,\"entity\":{\"model\":1,\"from\":8,\"to\":9,\"derivations\":[{\"target_field\":\"total\",\"source_fields\":[\"amount\"]}],\"id\":12,\"type\":\"connection\"}}]}"
+          changes (stream/normalize-changes raw)]
+      (is (= :connection-derivations (:entity (first changes))))
+      (is (= 8 (get-in (first changes) [:data :from])))))
+  (testing "Connect/Disconnect (created/deleted) stay plain :connection"
+    (let [raw "{\"op\":\"Connect\",\"changes\":[{\"action\":\"created\",\"type\":\"connection\",\"id\":12,\"entity\":{\"model\":1,\"from\":8,\"to\":9,\"derivations\":[],\"id\":12,\"type\":\"connection\"}}]}"
+          changes (stream/normalize-changes raw)]
+      (is (= :connection (:entity (first changes)))))))
+
+(deftest normalize-changes-invalid-payload-test
+  (is (nil? (stream/normalize-changes "not json at all")))
+  (is (nil? (stream/normalize-changes "{\"op\":\"Whatever\"}")) "no changes[] at all"))

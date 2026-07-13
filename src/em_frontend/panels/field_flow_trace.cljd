@@ -1,0 +1,22 @@
+(ns em-frontend.panels.field-flow-trace
+  "spec: surface FieldFlowTrace -- overlay shown while a field-flow trace is
+   active (Visualization.highlighted_path.count > 0); highlights carrying
+   connections, dims the rest (see em-frontend.interaction/select-field-for-trace
+   and em-frontend.canvas's connection-visual styling)."
+  (:require ["package:flutter/material.dart" :as m]))
+
+(defn field-flow-trace-banner
+  "{:keys [highlighted-element-names on-clear]}"
+  [{:keys [highlighted-element-names on-clear]}]
+  (m/Material
+    .elevation 2.0
+    .child
+    (m/Padding
+      .padding (m/EdgeInsets.symmetric .horizontal 12.0 .vertical 8.0)
+      .child
+      (m/Row
+        .mainAxisSize m/MainAxisSize.min
+        .children
+        [(m/Text (str "Tracing field flow through: "
+                     (apply str (interpose ", " highlighted-element-names))))
+         (m/TextButton .onPressed (fn [] (on-clear) nil) .child (m/Text "Clear"))]))))

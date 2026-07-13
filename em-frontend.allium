@@ -1,0 +1,996 @@
+-- allium: 3
+-- em-frontend.allium
+--
+-- Scope: read-only visualization UI for Event Models streamed from emcli.
+-- The app consumes an SSE stream (GET /stream): the first event seeds a
+-- normalized store from a snapshot, then one delta per authoring mutation
+-- patches it. The app renders a live, read-only visualization and updates
+-- it as deltas arrive.
+--
+-- Includes: SSE streaming lifecycle, store seeding, live layout/render,
+-- interactive read-only panels, error and empty handling.
+-- Excludes: model authoring (POST /authoring/* on a separate boundary),
+-- authentication.
+--
+-- Layout convention (canonical):
+--   Timelines  = table containers, one per model thread, stacked top-to-bottom
+--                on the canvas.
+--   Slices     = columns of the timeline table, ordered left-to-right by index.
+--   Swimlanes  = rows of the timeline table; each Placement renders as its own
+--                card, at the cell (slice-column × swimlane-row) given by that
+--                placement's slice and its element's assigned swimlane (default
+--                unnamed row if none). An element placed more than once — in
+--                different slices, or twice in one slice — renders once per
+--                placement; placements are never collapsed to a single card.
+--   Layout is per-timeline: re-laying out one timeline table never reflows
+--   the others.
+
+------------------------------------------------------------
+-- External Entities
+------------------------------------------------------------
+
+-- A single committed change delivered on the stream. Carries the authoring
+-- operation name and the affected entity (created/updated) or just its
+-- identity (deleted): emcli mutates its store first, then emits, so by the time
+-- a delete is sent its store no longer holds the full entity to include.
+-- Structure governed by emcli's change-stream schema.
+external entity Delta {}
+
+-- The seed payload of a (re)connection: a full nested snapshot of the model.
+external entity SnapshotSeed {}
+
+------------------------------------------------------------
+-- Value Types
+------------------------------------------------------------
+
+-- A typed field on an element. Fields nest via subfields.
+value Field {
+  name: String
+  type: FieldType
+  optional: Boolean
+  cardinality: FieldCardinality
+  subfields: List<Field>
+}
+
+-- How a target field on the `to` element is derived from one or more source
+-- fields on the `from` element. One source with a different name is a rename;
+-- many sources is an aggregation.
+value FieldDerivation {
+  target_field: String
+  source_fields: List<String>
+}
+
+-- Marks a field as legitimately introduced at an element rather than sourced
+-- from upstream. Its presence is why a field need not appear in any derivation.
+value FieldOrigin {
+  field: String
+  origin: FieldOriginKind
+}
+
+-- A concrete example value for a field, shown against a specification step.
+value Example {
+  field_name: String
+  field_value: String
+}
+
+------------------------------------------------------------
+-- Contracts
+------------------------------------------------------------
+
+-- The obligations the emcli SSE stream (GET /stream) must honour towards the
+-- consumer. The frontend demands this contract at its stream-ingest boundary.
+contract ChangeStream {
+  -- Open the stream at the given URL; the first event is always a snapshot.
+  connect: (stream_url: String) -> SnapshotSeed
+  -- The next change delivered after the given delta, in commit order.
+  next_delta: (after: Delta) -> Delta
+
+  @invariant SnapshotFirst
+    -- On every (re)connection the first event is exactly one snapshot, and the
+    -- store is seeded from it before any delta is processed.
+
+  @invariant DeltaOrder
+    -- Deltas are delivered and applied strictly in commit order, one per
+    -- authoring mutation, with no gap, no reordering and no duplication.
+
+  @invariant NoReplay
+    -- The stream has no replay: on reconnect the consumer receives a fresh
+    -- snapshot of current state, then deltas from that point. Prior
+    -- delta-built state is discarded and reseeded.
+}
+
+------------------------------------------------------------
+-- Enumerations
+------------------------------------------------------------
+
+enum SliceKind { state_change | state_view | automation }
+
+enum SliceStatus { created | in_progress | done | informational }
+
+enum ElementKind { command | event | read_model | screen | automation }
+
+enum ElementContext { internal | external }
+
+enum Clause { given_step | when_step | then_step }
+
+enum FieldType { string | boolean | double | decimal | long | custom | date | date_time | uuid | int }
+
+enum FieldCardinality { single | list }
+
+enum FieldOriginKind { user_input | generated | external }
+
+-- Lifecycle of the visualization surface as a whole.
+enum VisualizationState { loading | rendered | empty | error }
+
+-- Lifecycle of the underlying SSE stream connection.
+enum SSEState { connecting | connected | error | reconnecting }
+
+------------------------------------------------------------
+-- Entities and Variants
+------------------------------------------------------------
+
+-- The root of a streamed model. Seeded from the snapshot's `model` and
+-- re-seeded wholesale on every (re)connection.
+entity EventModel {
+  name: String
+
+  timelines: Timeline with model = this
+  swimlanes: Swimlane with model = this
+  elements: Element with model = this
+  connections: Connection with model = this
+}
+
+-- A table container in the visualization (one per model thread).
+-- Swimlanes are its rows, slices are its columns.
+entity Timeline {
+  model: EventModel
+  title: String
+
+  slices: Slice with timeline = this
+}
+
+-- A row of the timeline table. Elements assigned to it appear in its row;
+-- the row carries a background colour and a label on the left margin.
+entity Swimlane {
+  model: EventModel
+  name: String
+
+  members: Element with swimlane = this
+}
+
+-- A column of the timeline table, ordered left-to-right by index.
+entity Slice {
+  timeline: Timeline
+  title: String
+  kind: SliceKind
+  status: SliceStatus
+  index: Integer
+
+  placements: Placement with slice = this
+  specifications: Specification with slice = this
+}
+
+-- An element in the model: a command, event, read model, screen or automation.
+-- Appears in the snapshot only where it is placed or connected, but its
+-- CreateElement delta always arrives on the stream.
+entity Element {
+  model: EventModel
+  name: String
+  kind: ElementKind
+  context: ElementContext
+
+  -- True iff every field on the element is sourced (carried, derived, or
+  -- introduced). When false, the card renders a persistent amber border and
+  -- a hover tooltip listing the unsourced fields.
+  is_information_complete: Boolean
+
+  fields: List<Field>
+  field_origins: List<FieldOrigin>
+
+  -- Optional swimlane assignment. Absent means the default unnamed band.
+  swimlane: Swimlane?
+
+  -- Optional screen image; when present, screen cards show it as a thumbnail.
+  image_url: String?
+
+  placements: Placement with element = this
+  outgoing: Connection with from = this
+  incoming: Connection with to = this
+
+  -- Names of fields that are neither introduced here (no FieldOrigin) nor
+  -- carried/derived by an incoming connection. These are the unsourced fields
+  -- the incomplete tooltip lists.
+  origin_field_names: field_origins -> field
+  derived_field_names: incoming.derivations -> target_field
+  unsourced_fields: fields where name not in origin_field_names
+    and name not in derived_field_names
+
+  -- Fields shown directly on the canvas card, but only for the kinds whose
+  -- fields matter there: command, event and read_model. Screens show an image
+  -- thumbnail and automations have no fields of their own, so both yield none.
+  canvas_fields: if kind in {command, event, read_model}: fields else: {}
+}
+
+-- Records that an element appears in a slice. The unit of placement-driven
+-- layout: creating or removing one re-lays out only the affected timeline.
+entity Placement {
+  slice: Slice
+  element: Element
+}
+
+-- A directed edge between two elements, carrying per-field provenance.
+entity Connection {
+  model: EventModel
+  from: Element
+  to: Element
+  derivations: List<FieldDerivation>
+}
+
+-- A scenario attached to a slice (Given/When/Then). Specifications in a slice
+-- collapse and expand as a group: toggling any one toggles them all.
+entity Specification {
+  slice: Slice
+  title: String
+
+  steps: SpecStep with spec = this
+}
+
+-- A single clause within a specification, ordered by index. A `then` step may
+-- assert an error or an empty expectation rather than referencing an element.
+entity SpecStep {
+  spec: Specification
+  clause: Clause
+  index: Integer
+  is_error: Boolean
+  expect_empty: Boolean
+  examples: List<Example>
+
+  -- The element this step refers to; absent on an error step.
+  element: Element?
+
+  -- The asserted error name; present only on an error step.
+  error_name: String? when is_error = true
+}
+
+-- The visualization viewport and its transient view state. A single instance
+-- backs the rendered view. Zoom and pan are preserved across reconnections;
+-- store-derived state is reseeded.
+entity Visualization {
+  state: VisualizationState
+  zoom: Decimal
+  pan_x: Decimal
+  pan_y: Decimal
+
+  -- When set, only this timeline's table is rendered; others are hidden.
+  -- Null means show all timelines.
+  filtered_timeline: Timeline?
+
+  -- True while the user is panning, zooming or otherwise interacting; incoming
+  -- deltas are held and flushed when it returns to false.
+  interacting: Boolean
+
+  -- Elements on the currently traced field-flow path; empty when no trace is
+  -- active. Connections on the path are highlighted; others are dimmed.
+  highlighted_path: Set<Element>
+
+  transitions state {
+    -- Seed/reseed outcome.
+    loading -> rendered
+    loading -> empty
+    -- Stream failure can overlay an error from any visible state.
+    loading -> error
+    rendered -> error
+    empty -> error
+    -- (Re)connection reseeds: any state returns to loading.
+    rendered -> loading
+    empty -> loading
+    error -> loading
+  }
+}
+
+-- The SSE stream connection backing the visualization.
+entity SSEConnection {
+  state: SSEState
+
+  transitions state {
+    connecting -> connected
+    connecting -> reconnecting  -- first attempt fails; backoff retry begins
+    connected -> reconnecting
+    reconnecting -> connected
+    reconnecting -> error       -- max retries exhausted; error is terminal
+  }
+}
+
+------------------------------------------------------------
+-- Config
+------------------------------------------------------------
+
+config {
+  -- Zoom/pan seeded on first load, before any user interaction.
+  default_zoom: Decimal = 1.0
+  default_pan_x: Decimal = 0.0
+  default_pan_y: Decimal = 0.0
+
+  -- Hard zoom boundaries enforced on every zoom gesture.
+  min_zoom: Decimal = 0.1
+  max_zoom: Decimal = 5.0
+}
+
+------------------------------------------------------------
+-- Rules
+------------------------------------------------------------
+
+-- == Stream lifecycle and seeding ==========================================
+
+-- The snapshot (first event) on the very first connection seeds the store and
+-- brings up the visualization. With no prior viewport, zoom and pan start at
+-- the configured defaults.
+rule SnapshotCreatesModel {
+  when: SnapshotReceived(source, seed)
+  requires: not exists Visualization
+  ensures:
+    let model = EventModel.created()
+    StoreSeeded(seed: seed, model: model)
+    Visualization.created(
+      state: loading,
+      zoom: config.default_zoom,
+      pan_x: config.default_pan_x,
+      pan_y: config.default_pan_y,
+      filtered_timeline: null,
+      interacting: false,
+      highlighted_path: {}
+    )
+}
+
+-- On reconnect a fresh snapshot arrives. Discard the delta-built store and
+-- reseed it, but preserve the current zoom and pan so the user keeps their
+-- viewport. Filter and trace state are view-local and also preserved.
+rule ReconnectPreservesViewport {
+  when: SnapshotReceived(source, seed)
+  requires: exists Visualization
+  let viz = Visualization
+  ensures:
+    -- Store reseeded from the new snapshot; entity-level patches follow.
+    -- zoom / pan_x / pan_y deliberately left unchanged.
+    viz.state = loading
+    StoreSeeded(seed: seed, model: EventModel)
+}
+
+-- A snapshot with no timelines renders as empty, not error. Timelines are
+-- the primary visible structure; a model that has timelines but no
+-- placements or connections yet still renders those (empty) timeline rows
+-- rather than the empty-state overlay.
+rule EmptyModelRendered {
+  when: viz: Visualization.state becomes loading
+  let model = EventModel
+  requires: model.timelines.count = 0
+  ensures: viz.state = empty
+}
+
+-- A snapshot with at least one timeline renders the model, even if that
+-- timeline has no placements or connections yet.
+rule ModelRendered {
+  when: viz: Visualization.state becomes loading
+  let model = EventModel
+  requires: model.timelines.count > 0
+  ensures: viz.state = rendered
+}
+
+-- A stream error surfaces an error overlay over the visualization.
+rule ErrorStateShowsMessage {
+  when: connection: SSEConnection.state transitions_to error
+  requires: exists Visualization
+  let viz = Visualization
+  ensures:
+    viz.state = error
+    ErrorOverlayShown(connection: connection)
+}
+
+-- == Delta application: animation, layout and re-render =====================
+
+-- A newly created element animates in.
+rule ElementCreationAnimates {
+  when: element: Element.created
+  ensures: ElementAppears(element: element)
+}
+
+-- A deleted element animates out. (Witnessed via removal below.)
+rule ElementDeletionAnimates {
+  when: ElementDeleted(_, element)
+  ensures: ElementDisappears(element: element)
+}
+
+-- Deleting an element cascades: its placements and connections are removed,
+-- and the hosting timeline tables are re-laid out to close the vacated cells.
+rule DeletionCleansConnections {
+  when: ElementDeleted(_, element)
+  ensures:
+    for c in element.outgoing:
+      not exists c
+    for c in element.incoming:
+      not exists c
+    for p in element.placements:
+      not exists p
+      TimelineLaidOut(timeline: p.slice.timeline)
+}
+
+-- An element update re-renders the card and re-lays out every timeline that
+-- hosts the element (e.g. a swimlane reassignment moves the card to a different
+-- row, which requires repositioning within the table).
+rule ElementUpdateRerenders {
+  when: ElementUpdated(_, element)
+  ensures:
+    ElementRerendered(element: element)
+    for p in element.placements:
+      TimelineLaidOut(timeline: p.slice.timeline)
+}
+
+-- A connection create or delete adds or removes an edge, changing edge geometry,
+-- so it re-lays out only the timeline tables that actually draw an edge for this
+-- connection, not the whole canvas. An edge is only ever drawn between a
+-- from-placement and a to-placement that share a timeline (see
+-- ConnectionsRenderRightToLeft); a cross-timeline from/to placement pair yields no
+-- drawn edge and so needs no layout pass. The correct scope therefore mirrors that
+-- invariant's quantification exactly: every timeline holding at least one
+-- same-timeline from/to placement pair for this connection.
+--
+-- A connection's endpoints are placed by reference and each may be placed more
+-- than once, so a single connection can still draw edges in several timeline
+-- tables at once — hence a set of TimelineLaidOut calls rather than one. But the
+-- set is bounded to the matching-pair timelines, never "every timeline", so the
+-- full-canvas relayout the rule used to do is no longer needed. (This scoping is
+-- per timeline: several drawn edges WITHIN one timeline — e.g. a duplicate or
+-- informational slice repeating a pair — collapse to that timeline's single
+-- TimelineLaidOut; the per-edge multiplicity within a timeline matters to
+-- rendering, not to this layout scope. See the nearest-preceding-placement rule
+-- below for the full drawn-edge quantification.)
+--
+-- Note this does not cover a not-yet-existing pair: placements are their own
+-- entities and their creation/removal already fires PlacementChanged ->
+-- TimelineLaidOut for the affected timeline, so a connection whose matching pair
+-- is only about to exist is laid out by that placement's own delta, not this one.
+-- A ConnectionChanged carries no placements of its own to lay out.
+--
+-- Derivations-only updates are handled separately (ConnectionDerivationsRerenders):
+-- they change edge provenance/labels but not which edges exist or where they sit,
+-- so they need only an edge re-render, no layout pass.
+--
+-- On a delete, connection.from/to and their placements are still resolvable: emcli
+-- mutates then emits, so a delete delta carries only identity, but the frontend
+-- looks up its own previously-synced Connection, which is still fully populated
+-- when this fires — the same precedent DeletionCleansConnections relies on to read
+-- element.outgoing/incoming/placements while removing them.
+--
+-- Nearest-placement rule. A same-timeline (pf, pt) pair only DRAWS an edge when
+-- neither endpoint has a closer placement of its own in that timeline that would
+-- claim the other endpoint. This has two symmetric halves:
+--
+--   FROM side (nearest-preceding from): no other placement pf2 of `from` sits
+--   nearer to pt — i.e. no pf2 (same timeline) with pf.slice.index <
+--   pf2.slice.index <= pt.slice.index.
+--
+--   TO side (nearest-following to): no other placement pt2 of `to` sits nearer to
+--   pf — i.e. no pt2 (same timeline) with pf.slice.index <= pt2.slice.index <
+--   pt.slice.index.
+--
+-- This is the rendering predicate layered on top of
+-- ConnectionsRenderRightToLeft's geometric-validity constraint: that invariant
+-- constrains every same-timeline pair (pt at an equal-or-later column), while
+-- only the pair whose endpoints are mutually nearest actually draws.
+--
+-- Why BOTH halves are needed: each independently prevents one direction of
+-- "skipping over a closer occurrence", and neither subsumes the other.
+--   * Without the FROM half, an element placed several times in a timeline would
+--     draw an edge from a stale, earlier from-placement all the way to a far-right
+--     pt, visually crossing over its own closer from-placements — the
+--     backward-looking arrows the domain owner first saw.
+--   * Without the TO half, a single from-placement can draw edges to MULTIPLE
+--     to-placements at once: each to-placement independently finds this same from
+--     as its nearest-preceding one (the FROM half only suppresses stale FROMs for
+--     a given pt, never stale TOs for a given pf), so a closer pt fails to "claim"
+--     the from and a spurious long edge is drawn skipping over it. The FROM half
+--     cannot catch this because it never compares two to-placements.
+--
+-- Note the quantification is per surviving (pf, pt) pair, not per connection: a
+-- connection draws zero, one or MANY edges — one for every pair whose from is the
+-- nearest-preceding for that to AND whose to is the nearest-following for that
+-- from. This multiplicity is not only a cross-timeline phenomenon (the same pair
+-- placed in different timelines). It also arises WITHIN a single timeline: an
+-- informational or duplicate slice that repeats an earlier element pair gives the
+-- connection a second, mutually-nearest pair, and hence a second drawn edge,
+-- alongside the original. Every such edge is drawn independently; suppression
+-- applies only to stale far placements relative to a specific opposite-endpoint
+-- placement, never to a repeated pair as a whole.
+--
+-- FROM-side bound reasoning (window pf.index < pf2.index <= pt.index):
+--   * Lower bound strict (pf.index < pf2.index): a pf2 in the SAME column as pf
+--     is a tie, not "nearer". Were it inclusive, two same-column from-placements
+--     would each disqualify the other and neither would ever draw.
+--   * Upper bound inclusive (pf2.index <= pt.index): a pf2 landing exactly on pt's
+--     own column is strictly closer to pt than any earlier pf and must win, so it
+--     disqualifies pf.
+--   * No preceding pf2 at all: the disqualifier is vacuously absent, so a lone
+--     valid from-placement always draws.
+--   * Same-column pair (pf.index = pt.index): the window pf.index < pf2.index <=
+--     pt.index is empty, so same-column pairs are never disqualified — consistent
+--     with ConnectionsRenderRightToLeft allowing equal-index (non-forward) edges.
+--
+-- TO-side bound reasoning (window pf.index <= pt2.index < pt.index) — the mirror
+-- image, with the bounds swapped because it is pf, not pt, that now holds still:
+--   * Lower bound inclusive (pf.index <= pt2.index): a pt2 landing exactly on pf's
+--     own column is strictly closer to pf than any later pt and must win, so it
+--     disqualifies pt. This mirrors the FROM side's inclusive upper bound — a tie
+--     with the opposite endpoint's column still counts as strictly nearer to the
+--     moving endpoint.
+--   * Upper bound strict (pt2.index < pt.index): a pt2 in the SAME column as pt is
+--     a tie, not "nearer". Were it inclusive, two same-column to-placements would
+--     each disqualify the other and neither would ever draw. This mirrors the FROM
+--     side's strict lower bound.
+--   * No following pt2 at all: the disqualifier is vacuously absent, so a lone
+--     valid to-placement always draws.
+--   * Same-column pair (pf.index = pt.index): the window pf.index <= pt2.index <
+--     pt.index is empty (it degenerates to pf.index <= pt2.index < pf.index), so
+--     same-column pairs are never disqualified by this clause either — same
+--     degeneration as the FROM side.
+-- Both quantifiers are scoped to the pair's timeline; slice index is only
+-- comparable within a single timeline.
+rule ConnectionChangeRelaysOut {
+  when: ConnectionChanged(_, connection)
+  ensures:
+    for pf in connection.from.placements:
+      for pt in connection.to.placements:
+        if pf.slice.timeline = pt.slice.timeline
+            and not connection.from.placements.any(pf2 =>
+              pf2.slice.timeline = pf.slice.timeline
+              and pf.slice.index < pf2.slice.index
+              and pf2.slice.index <= pt.slice.index)
+            and not connection.to.placements.any(pt2 =>
+              pt2.slice.timeline = pf.slice.timeline
+              and pf.slice.index <= pt2.slice.index
+              and pt2.slice.index < pt.slice.index):
+          TimelineLaidOut(timeline: pf.slice.timeline)
+}
+
+-- A derivations-only connection update changes the edge's per-field provenance
+-- (target_field <- source_fields) shown in ConnectionDetails and used by field-flow
+-- tracing, but not which placements exist or where any edge sits geometrically. It
+-- therefore triggers only a cheap edge re-render — no TimelineLaidOut pass —
+-- mirroring how ElementUpdateRerenders fires ElementRerendered for a card re-render.
+rule ConnectionDerivationsRerenders {
+  when: ConnectionDerivationsUpdated(_, connection)
+  ensures: ConnectionRerendered(connection: connection)
+}
+
+-- A timeline change (created, renamed, deleted) shifts table row origins;
+-- the whole canvas is relaid out.
+rule TimelineChangeRelaysOut {
+  when: TimelineChanged(_, _)
+  ensures: CanvasRelaidOut
+}
+
+-- A swimlane change (created, renamed, recoloured, deleted) affects band
+-- row labels across all timeline tables; the whole canvas is relaid out.
+rule SwimlaneChangeRelaysOut {
+  when: SwimlaneChanged(_, _)
+  ensures: CanvasRelaidOut
+}
+
+-- Any slice change (created, reordered, status/kind set, deleted) re-lays out
+-- only the timeline table that owns the slice.
+rule SliceChangeTriggersLayout {
+  when: SliceChanged(_, slice)
+  ensures: TimelineLaidOut(timeline: slice.timeline)
+}
+
+-- Placing or removing an element in a slice re-lays out only that slice's
+-- timeline table.
+rule PlacementChangeTriggersLayout {
+  when: PlacementChanged(_, placement)
+  ensures: TimelineLaidOut(timeline: placement.slice.timeline)
+}
+
+-- == Interaction-deferred delta processing ==================================
+
+-- While the user is interacting (pan, zoom, drag), incoming deltas are held in
+-- a queue rather than applied, so the interaction is never interrupted.
+rule UserInteractionDefers {
+  when: DeltaReceived(_, delta)
+  requires: Visualization.interacting = true
+  ensures: DeltaQueued(delta: delta)
+}
+
+-- Starting a gesture marks the viewport as interacting; deltas defer from now.
+rule InteractionBegins {
+  when: BeginInteraction(viewer, viz)
+  requires: viz.interacting = false
+  ensures: viz.interacting = true
+}
+
+-- Ending a gesture clears the interacting flag.
+rule InteractionEnds {
+  when: EndInteraction(viewer, viz)
+  requires: viz.interacting = true
+  ensures: viz.interacting = false
+}
+
+-- Panning shifts the viewport offset by the gesture delta (not an absolute set).
+-- pan_x and pan_y are the cumulative delta from the start of the gesture.
+rule ViewportPans {
+  when: Pan(viewer, viz, pan_x, pan_y)
+  requires: viz.filtered_timeline = null
+  ensures:
+    viz.pan_x = viz.pan_x + pan_x
+    viz.pan_y = viz.pan_y + pan_y
+}
+
+-- Zooming scales the viewport by a multiplicative factor, clamped to
+-- [config.min_zoom, config.max_zoom] so the result stays within the
+-- observable zoom range (0.1x–5x).
+rule ViewportZooms {
+  when: Zoom(viewer, viz, zoom)
+  ensures:
+    viz.zoom = clamp(viz.zoom * zoom, config.min_zoom, config.max_zoom)
+}
+
+-- Resizing the browser window resizes the rendering viewport (the visible
+-- window into the pannable-zoomable world). It is a pure renderer concern:
+-- content-driven timeline/slice/swimlane layout is unaffected, so no entity
+-- state changes and only a declarative render effect fires.
+rule ViewportResizes {
+  when: ResizeViewport(viewer, viz, width, height)
+  ensures: CanvasResized(width: width, height: height)
+}
+
+-- When interaction ends, the held deltas are flushed and applied in order.
+rule InteractionEndFlushesQueue {
+  when: viz: Visualization.interacting transitions_to false
+  ensures: QueuedDeltasFlushed(viz: viz)
+}
+
+-- == Visual marking and tracing =============================================
+
+-- An element whose information is incomplete renders a persistent amber
+-- border (not only on hover).
+rule IncompleteElementMarked {
+  when: element: Element.is_information_complete becomes false
+  ensures: AmberBorderRendered(element: element)
+}
+
+-- Filtering to a timeline hides all other timeline tables and shows the
+-- selected one. The hidden/shown effects are named Disappears/Appears to
+-- signal an animated transition, mirroring the ElementAppears/ElementDisappears
+-- element animation convention above.
+rule TimelineFilterScopes {
+  when: FilterToTimeline(viewer, timeline)
+  let viz = Visualization
+  ensures:
+    viz.filtered_timeline = timeline
+    for t in Timelines where t != timeline:
+      TimelineDisappears(timeline: t)
+    TimelineAppears(timeline: timeline)
+}
+
+-- Clearing the filter restores all timeline tables to view; each restored
+-- timeline animates back in (TimelineAppears, mirroring the element convention).
+rule TimelineFilterCleared {
+  when: ClearTimelineFilter(viewer)
+  let viz = Visualization
+  requires: viz.filtered_timeline != null
+  ensures:
+    viz.filtered_timeline = null
+    for t in Timelines:
+      TimelineAppears(timeline: t)
+}
+
+-- Selecting a field highlights every connection whose derivations carry that
+-- field (forward: source_fields contains it; backward: target_field matches
+-- it) and dims the rest. The traced path's elements are recorded on the
+-- visualization.
+rule FieldFlowHighlights {
+  when: SelectFieldForTrace(viewer, element, field_name)
+  let viz = Visualization
+  let model = EventModel
+  let on_path =
+    model.connections where derivations.any(d =>
+      d.target_field = field_name or field_name in d.source_fields)
+  ensures:
+    viz.highlighted_path = trace_path_elements(on_path)
+    for c in on_path:
+      ConnectionHighlighted(connection: c)
+    for c in model.connections where c not in on_path:
+      ConnectionDimmed(connection: c)
+}
+
+-- == Invalid data ===========================================================
+
+-- A delta that fails validation is surfaced visibly rather than silently
+-- dropped; the rest of the store is left intact.
+rule InvalidDataVisible {
+  when: InvalidDeltaReceived(_, delta)
+  ensures: InvalidDataIndicatorShown(delta: delta)
+}
+
+------------------------------------------------------------
+-- Invariants
+------------------------------------------------------------
+
+-- A placement's element and slice must belong to the same model: an element
+-- can only be placed in a slice of a timeline in its own model.
+invariant PlacementWithinModel {
+  for p in Placements:
+    p.element.model = p.slice.timeline.model
+}
+
+-- A connection's endpoints must belong to the connection's model.
+invariant ConnectionEndpointsWithinModel {
+  for c in Connections:
+    c.from.model = c.model and c.to.model = c.model
+}
+
+-- An element's swimlane, when assigned, must belong to the element's model.
+invariant SwimlaneWithinModel {
+  for e in Elements:
+    e.swimlane != null implies e.swimlane.model = e.model
+}
+
+-- Connections render right-to-left: no forward edge, hence no loop in the
+-- derivation ordering. A connection's `to` element (the deriver) must never
+-- sit at an earlier column than its `from` element, so the arrow is always
+-- drawn back to an equal-or-earlier slice. Equal index (same column) is
+-- allowed: elements may be placed twice in one slice, and a within-column
+-- edge is not forward and forms no loop.
+--
+-- Slice `index` orders columns left-to-right per timeline (layout is
+-- per-timeline), so an index is only comparable with another index in the
+-- same timeline. An element may have several placements, so this quantifies
+-- over every from/to placement pair and constrains each pair that shares a
+-- timeline. An unplaced endpoint has no column and so is not constrained.
+--
+-- Cross-timeline connections are a real, expected model state: because both
+-- connections and placements are by reference, an element placed in one
+-- timeline can be connected from/to an element placed in another. Such a
+-- from/to placement pair is deliberately left unconstrained here NOT because
+-- a cross-timeline edge renders without the right-to-left rule, but because
+-- it never renders as an edge at all: an edge is only ever drawn between a
+-- from-placement and a to-placement that share a timeline. Cross-timeline
+-- placement pairs yield no drawn edge, so there is no geometry to constrain.
+-- This invariant governs the geometric validity of every same-timeline pair.
+--
+-- Which of those pairs actually DRAWS an edge is a narrower, rendering-time
+-- question and deliberately not asserted here: see the nearest-preceding-
+-- placement rule documented on ConnectionChangeRelaysOut. Of the same-timeline
+-- pairs this invariant constrains, only the one whose from-placement is nearest
+-- to a given to-placement draws; the rest are geometrically valid but suppressed.
+-- Folding that selection into this invariant would only weaken it (constraining
+-- fewer pairs) without adding meaning — the right-to-left constraint must hold
+-- for ALL same-timeline pairs, drawn or suppressed — so it lives in the rule.
+invariant ConnectionsRenderRightToLeft {
+  for c in Connections:
+    for pf in c.from.placements:
+      for pt in c.to.placements:
+        pf.slice.timeline = pt.slice.timeline
+          implies pt.slice.index >= pf.slice.index
+}
+
+------------------------------------------------------------
+-- Actor Declarations
+------------------------------------------------------------
+
+-- The only human party is a viewer of the read-only visualization. There is
+-- no authentication, so any session is a viewer.
+actor Viewer {
+  identified_by: Visualization where state in {rendered, empty, error}
+}
+
+-- The emcli stream process is the non-human party at the ingest boundary. It
+-- is the source of every snapshot and delta.
+actor StreamSource {
+  identified_by: SSEConnection where state in {connected, reconnecting}
+}
+
+------------------------------------------------------------
+-- Surfaces
+------------------------------------------------------------
+
+-- Read-only side panel for a clicked element. Selecting a field here starts a
+-- field-flow trace (see FieldFlowTrace).
+surface ElementDetails {
+  facing viewer: Viewer
+  context element: Element
+
+  exposes:
+    element.name
+    element.kind
+    element.context
+    element.swimlane
+    element.is_information_complete
+    element.image_url
+    for f in element.fields:
+      f.name
+      f.type
+      f.optional
+      f.cardinality
+
+  provides:
+    SelectFieldForTrace(viewer, element, field_name)
+    CloseElementDetails(viewer, element)
+}
+
+-- Read-only panel for a clicked connection, showing endpoints and per-field
+-- derivations (target_field <- source_fields).
+surface ConnectionDetails {
+  facing viewer: Viewer
+  context connection: Connection
+
+  exposes:
+    connection.from.name
+    connection.to.name
+    for d in connection.derivations:
+      d.target_field
+      d.source_fields
+
+  provides:
+    CloseConnectionDetails(viewer, connection)
+}
+
+-- Expanded view of the specifications in a slice. All specifications in a
+-- slice share one toggle: clicking any one expands or collapses them all,
+-- showing Given/When/Then steps in index order with their examples.
+surface SpecificationExpanded {
+  facing viewer: Viewer
+  context slice: Slice
+
+  exposes:
+    for spec in slice.specifications:
+      spec.title
+      for step in spec.steps:
+        step.clause
+        step.index
+        step.element
+        step.is_error
+        step.expect_empty
+        for ex in step.examples:
+          ex.field_name
+          ex.field_value
+
+  provides:
+    ToggleSliceSpecifications(viewer, slice)
+}
+
+-- Hover tooltip on an incomplete element listing the fields not yet sourced.
+surface IncompleteTooltip {
+  facing viewer: Viewer
+  context element: Element where is_information_complete = false
+
+  exposes:
+    for f in element.unsourced_fields:
+      f.name
+      f.type
+}
+
+-- Timeline header click filters the view to that timeline's table. Clicking
+-- the active timeline clears the filter; clicking another switches to it.
+surface TimelineFilter {
+  facing viewer: Viewer
+  context timeline: Timeline
+
+  exposes:
+    timeline.title
+
+  provides:
+    FilterToTimeline(viewer, timeline)
+    ClearTimelineFilter(viewer)
+}
+
+-- Field-flow trace overlay: highlights the connections carrying the selected
+-- field forward (source_fields contains it) and backward (target_field matches
+-- it), dimming the rest.
+surface FieldFlowTrace {
+  facing viewer: Viewer
+  context viz: Visualization where highlighted_path.count > 0
+
+  exposes:
+    viz.highlighted_path
+
+  provides:
+    ClearFieldFlowTrace(viewer, viz)
+}
+
+-- The stream-ingest boundary: the entry point through which the emcli SSE
+-- stream feeds snapshots and deltas into the app. It demands the ChangeStream
+-- contract and provides the trigger entry points that the delta-application
+-- rules listen for. Each provided action corresponds to one kind of committed
+-- change delivered on the stream.
+surface StreamIngest {
+  facing source: StreamSource
+
+  contracts:
+    demands ChangeStream
+
+  provides:
+    -- The first event of a (re)connection: a full snapshot to seed the store.
+    SnapshotReceived(source, seed)
+    -- A delta arrived and is being applied (queued first when interacting).
+    DeltaReceived(source, delta)
+    -- A delta that failed validation arrived.
+    InvalidDeltaReceived(source, delta)
+    -- An element was deleted (DeleteElement op, cascade applied).
+    ElementDeleted(source, element)
+    -- An element was updated (rename, fields, context, swimlane, image,
+    -- field origins).
+    ElementUpdated(source, element)
+    -- A connection was created or deleted (an edge appears or vanishes; edge
+    -- geometry changes, so the drawing timelines re-lay out).
+    ConnectionChanged(source, connection)
+    -- A connection's derivations were updated (edge provenance/labels changed,
+    -- but no edge appears, vanishes or moves; only an edge re-render is needed).
+    ConnectionDerivationsUpdated(source, connection)
+    -- A timeline was created, renamed, or deleted.
+    TimelineChanged(source, timeline)
+    -- A swimlane was created, renamed, recoloured, or deleted.
+    SwimlaneChanged(source, swimlane)
+    -- A slice was created, reordered, restatused, rekinded or deleted.
+    SliceChanged(source, slice)
+    -- An element was placed in or removed from a slice.
+    PlacementChanged(source, placement)
+
+  @guarantee NoInterruption
+    -- No delta is applied while the user is interacting: deltas are held in a
+    -- queue (Visualization.interacting = true) and flushed in order once the
+    -- interaction ends.
+
+  @guarantee LargeModelScale
+    -- Ingest, layout and re-render remain responsive for models containing
+    -- thousands of elements, placements and connections.
+}
+
+-- The viewport the viewer manipulates: zoom and pan, and the begin/end of an
+-- interaction gesture. While a gesture is in progress, incoming deltas are
+-- deferred (see UserInteractionDefers / InteractionEndFlushesQueue).
+surface Viewport {
+  facing viewer: Viewer
+  context viz: Visualization
+
+  exposes:
+    viz.zoom
+    viz.pan_x
+    viz.pan_y
+    viz.filtered_timeline
+    viz.interacting
+
+  provides:
+    BeginInteraction(viewer, viz)
+    EndInteraction(viewer, viz)
+    -- Pan is disabled when a timeline filter is active (filtered view scrolls within one row).
+    Pan(viewer, viz, pan_x, pan_y) when viz.filtered_timeline = null
+    Zoom(viewer, viz, zoom)
+    -- Browser window resize; resizes the rendering viewport only, not layout.
+    ResizeViewport(viewer, viz, width, height)
+}
+
+-- The rendered canvas: the read-only row/column/band layout. Exposes the
+-- per-slice styling fields (kind drives column treatment, status drives shading),
+-- the swimlane bands with their labels, and the placements within each slice —
+-- one card per placement, so an element placed more than once (in this slice
+-- or another) appears that many times rather than being collapsed to one.
+surface Canvas {
+  facing viewer: Viewer
+  context timeline: Timeline
+
+  exposes:
+    timeline.title
+    for band in timeline.model.swimlanes:
+      band.name
+    for slice in timeline.slices:
+      slice.title
+      slice.kind
+      slice.status
+      slice.index
+      for placement in slice.placements:
+        placement.element.name
+        placement.element.kind
+        placement.element.swimlane
+        for f in placement.element.canvas_fields:
+          f.name
+          f.type
+}

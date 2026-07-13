@@ -1,0 +1,49 @@
+(ns em-frontend.edges
+  "spec: the nearest-placement predicate documented at length on rule
+   ConnectionChangeRelaysOut. It is the sole authority for which (from, to)
+   placement pairs actually draw an edge -- both for deciding which
+   timelines need TimelineLaidOut there, and for the edges em-frontend.canvas
+   paints. One algorithm, two callers, per that rule's own comment.
+
+   Placements are plain maps of {:placement-id :timeline :index}, i.e.
+   already resolved to their slice's timeline id and index -- slice index is
+   only ever comparable within one timeline.")
+
+(defn- nearer-from?
+  "A pf2 in `from`'s own timeline sits strictly nearer to pt than pf does:
+   pf.index < pf2.index <= pt.index. Strict lower bound: a same-column pf2
+   is a tie, not nearer. Inclusive upper bound: a pf2 landing exactly on
+   pt's column is strictly closer to pt than any earlier pf."
+  [pf pt pf2]
+  (and (= (:timeline pf2) (:timeline pf))
+       (< (:index pf) (:index pf2))
+       (<= (:index pf2) (:index pt))))
+
+(defn- nearer-to?
+  "Mirror image: a pt2 in `from`'s timeline sits strictly nearer to pf than
+   pt does: pf.index <= pt2.index < pt.index."
+  [pf pt pt2]
+  (and (= (:timeline pt2) (:timeline pf))
+       (<= (:index pf) (:index pt2))
+       (< (:index pt2) (:index pt))))
+
+(defn drawn-edges
+  "Every (from, to) placement pair that actually draws an edge: same
+   timeline, and mutually nearest -- no closer pf2 disqualifies pf for this
+   pt, no closer pt2 disqualifies pt for this pf. A connection may draw
+   zero, one, or many edges (an element placed several times, or a repeated
+   pair within one timeline, both yield multiplicity)."
+  [from-placements to-placements]
+  (for [pf from-placements
+        pt to-placements
+        :when (and (= (:timeline pf) (:timeline pt))
+                   (not-any? #(nearer-from? pf pt %) from-placements)
+                   (not-any? #(nearer-to? pf pt %) to-placements))]
+    {:from (:placement-id pf) :to (:placement-id pt) :timeline (:timeline pf)}))
+
+(defn timelines-to-relayout
+  "rule ConnectionChangeRelaysOut: every timeline holding at least one
+   surviving (from, to) pair for this connection -- the bounded relayout
+   scope that replaced the old full-canvas relayout."
+  [from-placements to-placements]
+  (into #{} (map :timeline) (drawn-edges from-placements to-placements)))

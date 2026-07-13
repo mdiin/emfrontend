@@ -1,0 +1,61 @@
+(ns em-frontend.model-test
+  "spec: entity Element's derived values (origin_field_names,
+   derived_field_names, unsourced_fields, canvas_fields) -- categories
+   projection, entity_relationship, entity_optional, value_equality,
+   enum_comparable."
+  (:require [cljd.test :refer [deftest is testing]]
+            [em-frontend.model :as model]))
+
+(def field-a {:name "amount" :type :decimal :optional false :cardinality :single :subfields []})
+(def field-b {:name "total" :type :decimal :optional false :cardinality :single :subfields []})
+(def field-c {:name "notes" :type :string :optional true :cardinality :single :subfields []})
+
+(deftest origin-field-names-test
+  (testing "field_origins -> field"
+    (is (= #{"amount"} (model/origin-field-names {:field_origins [{:field "amount" :origin :user_input}]})))
+    (is (= #{} (model/origin-field-names {:field_origins []})))))
+
+(deftest derived-field-names-test
+  (testing "incoming.derivations -> target_field, across every incoming connection"
+    (is (= #{"total"} (model/derived-field-names [{:derivations [{:target_field "total" :source_fields ["amount"]}]}])))
+    (is (= #{} (model/derived-field-names [])))
+    (is (= #{"total" "notes"}
+           (model/derived-field-names [{:derivations [{:target_field "total" :source_fields ["amount"]}]}
+                                        {:derivations [{:target_field "notes" :source_fields ["memo"]}]}])))))
+
+(deftest unsourced-fields-test
+  (testing "fields where name not in origin_field_names and not in derived_field_names"
+    (let [element {:fields [field-a field-b field-c] :field_origins [{:field "amount" :origin :user_input}]}
+          incoming [{:derivations [{:target_field "total" :source_fields ["amount"]}]}]]
+      (is (= [field-c] (model/unsourced-fields element incoming)))))
+  (testing "an origin and a derivation each independently source a field"
+    (let [element {:fields [field-a field-b] :field_origins [{:field "amount" :origin :user_input}]}
+          incoming [{:derivations [{:target_field "total" :source_fields ["amount"]}]}]]
+      (is (= [] (model/unsourced-fields element incoming)))))
+  (testing "no origin and no incoming connection at all -- every field unsourced"
+    (let [element {:fields [field-a field-b] :field_origins []}]
+      (is (= [field-a field-b] (model/unsourced-fields element []))))))
+
+(deftest canvas-fields-test
+  (testing "command/event/read_model show their fields on the canvas card"
+    (doseq [kind [:command :event :read_model]]
+      (is (= [field-a] (model/canvas-fields {:kind kind :fields [field-a]})))))
+  (testing "screen and automation show none, regardless of declared fields"
+    (doseq [kind [:screen :automation]]
+      (is (= [] (model/canvas-fields {:kind kind :fields [field-a]}))))))
+
+(deftest value-type-structural-equality-test
+  (testing "Field, FieldDerivation, FieldOrigin, Example are plain maps: structural equality, not identity"
+    (is (= field-a (assoc {} :name "amount" :type :decimal :optional false :cardinality :single :subfields [])))
+    (is (= {:target_field "total" :source_fields ["amount"]}
+           {:target_field "total" :source_fields ["amount"]}))
+    (is (= {:field "amount" :origin :user_input} {:field "amount" :origin :user_input}))
+    (is (= {:field_name "amount" :field_value "42"} {:field_name "amount" :field_value "42"}))))
+
+(deftest enum-comparable-test
+  (testing "enum members compare by value across separately-constructed instances"
+    (is (= :command :command))
+    (is (not= :command :event))
+    (is (= :list :list))
+    (is (= :done :done))
+    (is (not= :done :in_progress))))

@@ -1,0 +1,68 @@
+(ns em-frontend.layout
+  "spec: the canonical layout convention documented at the top of
+   em-frontend.allium (timelines = tables stacked top-to-bottom; slices =
+   columns ordered left-to-right by index; swimlanes = rows; a placement
+   renders as its own card at (slice-column x swimlane-row)). Layout is
+   per-timeline: this whole namespace operates on one timeline's own
+   slices/placements/elements, matching every TimelineLaidOut rule's scope.
+   AGENTS.md calls for a custom-built grid-layout calculator (no library);
+   this is it.")
+
+(def slice-width 220.0)
+(def slice-header-height 56.0)
+(def swimlane-row-height 120.0)
+(def swimlane-label-width 96.0)
+(def card-margin 8.0)
+
+(defn- index-of [coll x]
+  (first (keep-indexed (fn [i v] (when (= v x) i)) coll)))
+
+(defn swimlane-row-index
+  "Row 0 is the default unnamed band (element.swimlane = nil); named
+   swimlanes occupy rows 1.. in `swimlane-order`."
+  [swimlane-order element-swimlane-id]
+  (if (nil? element-swimlane-id)
+    0
+    (if-some [i (index-of swimlane-order element-swimlane-id)]
+      (inc i)
+      0)))
+
+(defn layout-timeline
+  "in: {:slices [...] :placements [...] :elements {id -> element}
+        :swimlane-order [swimlane-id ...]}
+   slices/placements/elements are scoped to this one timeline already.
+   out: per-placement cell rects (one per placement -- an element placed
+   twice renders twice, never collapsed), per-slice column header rects,
+   per-swimlane-row band rects, and the table's total size."
+  [{:keys [slices placements elements swimlane-order]}]
+  (let [ordered-slices (sort-by :index slices)
+        col-index (into {} (map-indexed (fn [i s] [(:id s) i])) ordered-slices)
+        row-count (inc (count swimlane-order))
+        placement-cells
+        (for [p placements
+              :let [element (get elements (:element p))
+                    col (get col-index (:slice p))
+                    row (swimlane-row-index swimlane-order (:swimlane element))]
+              :when (some? col)]
+          {:placement-id (:id p)
+           :element-id (:element p)
+           :col col :row row
+           :rect {:x (+ swimlane-label-width (* col slice-width) card-margin)
+                  :y (+ slice-header-height (* row swimlane-row-height) card-margin)
+                  :width (- slice-width (* 2 card-margin))
+                  :height (- swimlane-row-height (* 2 card-margin))}})
+        slice-headers
+        (for [[i s] (map-indexed vector ordered-slices)]
+          {:slice-id (:id s) :index i
+           :rect {:x (+ swimlane-label-width (* i slice-width)) :y 0.0
+                  :width slice-width :height slice-header-height}})
+        table-width (+ swimlane-label-width (* (count ordered-slices) slice-width))
+        swimlane-bands
+        (for [row (range row-count)]
+          {:row row
+           :rect {:x 0.0 :y (+ slice-header-height (* row swimlane-row-height))
+                  :width table-width :height swimlane-row-height}})]
+    {:placements placement-cells
+     :slice-headers slice-headers
+     :swimlane-bands swimlane-bands
+     :size {:width table-width :height (+ slice-header-height (* row-count swimlane-row-height))}}))

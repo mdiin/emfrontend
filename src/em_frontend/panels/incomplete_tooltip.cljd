@@ -1,0 +1,22 @@
+(ns em-frontend.panels.incomplete-tooltip
+  "spec: surface IncompleteTooltip -- hover tooltip on an incomplete element
+   listing the fields not yet sourced (element.unsourced_fields)."
+  (:require ["package:flutter/material.dart" :as m]))
+
+(defn incomplete-tooltip
+  "unsourced-fields: as produced by em-frontend.model/unsourced-fields."
+  [unsourced-fields]
+  (m/Card
+    .color m/Colors.amber.shade50
+    .child
+    (m/Padding
+      .padding (m/EdgeInsets.all 8.0)
+      .child
+      (m/Column
+        .crossAxisAlignment m/CrossAxisAlignment.start
+        .mainAxisSize m/MainAxisSize.min
+        .children
+        (into [(m/Text "Unsourced fields" .style (m/TextStyle .fontWeight m/FontWeight.w600))]
+              (mapv (fn [f] (m/Text (str (:name f) ": " (name (:type f)))
+                                    .style (m/TextStyle .fontSize 11.0)))
+                    unsourced-fields))))))

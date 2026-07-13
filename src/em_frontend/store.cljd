@@ -1,0 +1,311 @@
+(ns em-frontend.store
+  "spec: `Entities and Variants`, `Rules` and `Invariants` sections of
+   em-frontend.allium. A single normalized, atom-backed store indexed by
+   entity id; every rule is a pure function `store -> {:store :effects}`.
+   `effects` are the declarative render/animation triggers each rule
+   `ensures` (ElementAppears, TimelineLaidOut, CanvasRelaidOut, ...) --
+   em-frontend.canvas and the panels consume them, they are never stored.
+
+   `becomes`/`transitions_to` semantics (used by IncompleteElementMarked,
+   the Visualization and SSEConnection transitions state {} blocks, and
+   ErrorStateShowsMessage) are all implemented as: fires when the new value
+   equals the target and the prior value did not -- including on creation,
+   where the prior value is absent."
+  (:require [em-frontend.config :as config]
+            [em-frontend.edges :as edges]))
+
+;; == Store shape and construction ===========================================
+
+(defn initial-store []
+  {:event-model nil
+   :timelines {} :swimlanes {} :slices {} :elements {} :placements {} :connections {}
+   :specifications {} :spec-steps {}
+   :visualization nil
+   :sse-connection {:state :connecting}
+   :delta-queue []})
+
+(defn- becomes? [prior-val new-val target]
+  (and (= new-val target) (not= prior-val target)))
+
+;; == Query helpers (the `with` back-relations from the spec's entities) =====
+
+(defn placements-of-element [store element-id]
+  (filter #(= (:element %) element-id) (vals (:placements store))))
+
+(defn outgoing-connections [store element-id]
+  (filter #(= (:from %) element-id) (vals (:connections store))))
+
+(defn incoming-connections [store element-id]
+  (filter #(= (:to %) element-id) (vals (:connections store))))
+
+(defn placement-timeline-id [store placement]
+  (get-in store [:slices (:slice placement) :timeline]))
+
+(defn placement-geometry
+  "A placement resolved to its slice's timeline id and index -- the shape
+   em-frontend.edges' nearest-placement predicate operates on."
+  [store placement]
+  (let [slice (get-in store [:slices (:slice placement)])]
+    {:placement-id (:id placement) :timeline (:timeline slice) :index (:index slice)}))
+
+;; == Stream lifecycle and seeding ============================================
+
+(defn- seed-store
+  "Wholesale replace of every entity index from a freshly (re)connected
+   snapshot -- satisfies the ChangeStream contract's NoReplay invariant:
+   prior delta-built state is discarded and reseeded, not merged."
+  [store snapshot]
+  (assoc store
+    :event-model (:model snapshot)
+    :timelines (:timelines snapshot)
+    :swimlanes (:swimlanes snapshot)
+    :slices (:slices snapshot)
+    :elements (:elements snapshot)
+    :placements (:placements snapshot)
+    :connections (:connections snapshot)
+    :specifications (:specifications snapshot)
+    :spec-steps (:spec-steps snapshot)
+    :delta-queue []))
+
+(defn- render-loading-transition
+  "rules EmptyModelRendered / ModelRendered: fired by `viz.state becomes
+   loading`, which every seeding path below triggers."
+  [store effects]
+  (let [rendered (if (zero? (count (:timelines store))) :empty :rendered)]
+    {:store (assoc-in store [:visualization :state] rendered) :effects effects}))
+
+(defn snapshot-received
+  "Dispatches to SnapshotCreatesModel (no prior Visualization) or
+   ReconnectPreservesViewport (Visualization already exists)."
+  [store seed]
+  (if (nil? (:visualization store))
+    ;; rule SnapshotCreatesModel
+    (let [store' (-> store
+                      (seed-store seed)
+                      (assoc :visualization
+                             {:state :loading
+                              :zoom config/default-zoom
+                              :pan_x config/default-pan-x
+                              :pan_y config/default-pan-y
+                              :filtered_timeline nil
+                              :interacting false
+                              :highlighted_path #{}}))]
+      (render-loading-transition store' [{:type :store-seeded :seed seed}]))
+    ;; rule ReconnectPreservesViewport: zoom/pan_x/pan_y/filtered_timeline
+    ;; and highlighted_path are view-local and deliberately left unchanged.
+    (let [store' (seed-store store seed)]
+      (render-loading-transition store' [{:type :store-seeded :seed seed}]))))
+
+;; == SSE connection state machine ============================================
+
+(defn set-sse-state
+  "rule ErrorStateShowsMessage fires only on the transition into :error, and
+   only when a Visualization already exists to show the overlay over."
+  [store new-state]
+  (let [prior (get-in store [:sse-connection :state])
+        store' (assoc-in store [:sse-connection :state] new-state)]
+    (if (and (becomes? prior new-state :error) (some? (:visualization store)))
+      {:store (assoc-in store' [:visualization :state] :error)
+       :effects [{:type :error-overlay-shown :connection (:sse-connection store')}]}
+      {:store store' :effects []})))
+
+;; == Element deltas ==========================================================
+
+(defn- incomplete-marking-effect
+  "rule IncompleteElementMarked"
+  [prior-element element]
+  (when (becomes? (:is_information_complete prior-element)
+                   (:is_information_complete element)
+                   false)
+    {:type :amber-border-rendered :element element}))
+
+(defn element-created
+  "rule ElementCreationAnimates (+ IncompleteElementMarked on arrival)."
+  [store element]
+  (let [store' (assoc-in store [:elements (:id element)] element)
+        incomplete-fx (incomplete-marking-effect nil element)]
+    {:store store'
+     :effects (cond-> [{:type :element-appears :element element}]
+                incomplete-fx (conj incomplete-fx))}))
+
+(defn element-updated
+  "rule ElementUpdateRerenders (+ IncompleteElementMarked)."
+  [store element]
+  (let [prior (get-in store [:elements (:id element)])
+        store' (assoc-in store [:elements (:id element)] element)
+        placements (placements-of-element store' (:id element))
+        timeline-ids (into #{} (map #(placement-timeline-id store' %)) placements)
+        incomplete-fx (incomplete-marking-effect prior element)]
+    {:store store'
+     :effects (cond-> [{:type :element-rerendered :element element}]
+                incomplete-fx (conj incomplete-fx)
+                true (into (map (fn [tid] {:type :timeline-laid-out :timeline tid})) timeline-ids))}))
+
+(defn element-deleted
+  "rules ElementDeletionAnimates + DeletionCleansConnections."
+  [store element-id]
+  (let [element (get-in store [:elements element-id])
+        outgoing (outgoing-connections store element-id)
+        incoming (incoming-connections store element-id)
+        placements (placements-of-element store element-id)
+        timeline-ids (into #{} (map #(placement-timeline-id store %)) placements)
+        store' (-> store
+                   (update :connections #(apply dissoc % (map :id (concat outgoing incoming))))
+                   (update :placements #(apply dissoc % (map :id placements)))
+                   (update :elements dissoc element-id))]
+    {:store store'
+     :effects (into [{:type :element-disappears :element element}]
+                     (map (fn [tid] {:type :timeline-laid-out :timeline tid}))
+                     timeline-ids)}))
+
+;; == Connection deltas ========================================================
+
+(defn connection-changed
+  "rule ConnectionChangeRelaysOut, covering both create and delete (the
+   surface's single ConnectionChanged trigger). Relayout scope is exactly
+   the timelines holding a surviving nearest-placement pair for this
+   connection (see em-frontend.edges), never the whole canvas.
+
+   On delete, `connection` carries only identity (Delta's external-entity
+   comment), so geometry is computed from the still-populated prior entry --
+   emcli mutates then emits, so the frontend's own previously-synced
+   Connection (with its from/to/placements) is still resolvable here, the
+   same precedent DeletionCleansConnections relies on."
+  [store change connection]
+  (let [resolved (if (= change :deleted)
+                   (get-in store [:connections (:id connection)])
+                   connection)
+        from-placements (map #(placement-geometry store %)
+                              (placements-of-element store (:from resolved)))
+        to-placements (map #(placement-geometry store %)
+                            (placements-of-element store (:to resolved)))
+        timeline-ids (edges/timelines-to-relayout from-placements to-placements)
+        store' (if (= change :deleted)
+                 (update store :connections dissoc (:id connection))
+                 (assoc-in store [:connections (:id connection)] connection))]
+    {:store store'
+     :effects (into [] (map (fn [tid] {:type :timeline-laid-out :timeline tid})) timeline-ids)}))
+
+(defn connection-derivations-updated
+  "rule ConnectionDerivationsRerenders: provenance/labels only, no geometry
+   change, so a cheap edge re-render suffices -- no TimelineLaidOut pass."
+  [store connection]
+  (let [store' (update-in store [:connections (:id connection)] merge connection)]
+    {:store store' :effects [{:type :connection-rerendered :connection connection}]}))
+
+;; == Timeline / swimlane / slice / placement deltas ==========================
+
+(defn timeline-changed
+  "rule TimelineChangeRelaysOut: created, renamed or deleted, always a full
+   CanvasRelaidOut (row origins shift for every timeline table)."
+  [store change timeline]
+  (let [store' (if (= change :deleted)
+                 (update store :timelines dissoc (:id timeline))
+                 (assoc-in store [:timelines (:id timeline)] timeline))]
+    {:store store' :effects [{:type :canvas-relaid-out}]}))
+
+(defn swimlane-changed
+  "rule SwimlaneChangeRelaysOut: band labels are shared across every
+   timeline table, so this is also a full CanvasRelaidOut."
+  [store change swimlane]
+  (let [store' (if (= change :deleted)
+                 (update store :swimlanes dissoc (:id swimlane))
+                 (assoc-in store [:swimlanes (:id swimlane)] swimlane))]
+    {:store store' :effects [{:type :canvas-relaid-out}]}))
+
+(defn slice-changed
+  "rule SliceChangeTriggersLayout: relayout only the owning timeline."
+  [store change slice]
+  (let [prior (get-in store [:slices (:id slice)])
+        timeline-id (:timeline (if (= change :deleted) prior slice))
+        store' (if (= change :deleted)
+                 (update store :slices dissoc (:id slice))
+                 (assoc-in store [:slices (:id slice)] slice))]
+    {:store store' :effects [{:type :timeline-laid-out :timeline timeline-id}]}))
+
+(defn placement-changed
+  "rule PlacementChangeTriggersLayout: relayout only the slice's timeline."
+  [store change placement]
+  (let [prior (get-in store [:placements (:id placement)])
+        slice-id (:slice (if (= change :deleted) prior placement))
+        timeline-id (get-in store [:slices slice-id :timeline])
+        store' (if (= change :deleted)
+                 (update store :placements dissoc (:id placement))
+                 (assoc-in store [:placements (:id placement)] placement))]
+    {:store store' :effects [{:type :timeline-laid-out :timeline timeline-id}]}))
+
+;; == Specification / spec-step deltas =========================================
+;; Not covered by any named rule in em-frontend.allium's Rules section, but
+;; the wire does emit AddSpecification/AddSpecStep/etc (see
+;; ../thecli/docs/change-stream.md); SpecificationExpanded reads this data on
+;; demand, so it just needs to land in the store -- no relayout/render effect
+;; is declared for it anywhere in the spec.
+
+(defn specification-changed
+  [store change specification]
+  (let [store' (if (= change :deleted)
+                 (update store :specifications dissoc (:id specification))
+                 (assoc-in store [:specifications (:id specification)] specification))]
+    {:store store' :effects []}))
+
+(defn spec-step-changed
+  [store change spec-step]
+  (let [store' (if (= change :deleted)
+                 (update store :spec-steps dissoc (:id spec-step))
+                 (assoc-in store [:spec-steps (:id spec-step)] spec-step))]
+    {:store store' :effects []}))
+
+;; == Invalid data =============================================================
+
+(defn invalid-delta-received
+  "rule InvalidDataVisible: surfaced visibly, rest of the store left intact."
+  [store raw-delta]
+  {:store store :effects [{:type :invalid-data-indicator-shown :delta raw-delta}]})
+
+;; == Generic delta entry point ================================================
+;; em-frontend.stream parses wire bytes into a vector of {:entity :change
+;; :data} changes per SSE delta event (or a raw/unparseable payload) and
+;; calls only `ingest-delta`; everything above is reached solely through this
+;; dispatch, mirroring how the StreamIngest surface's DeltaReceived is the
+;; one gate every delta passes through before its specific typed trigger
+;; fires.
+
+(defn apply-delta
+  "Dispatches one parsed change to its specific rule."
+  [store {:keys [entity change data] :as delta}]
+  (case entity
+    :element (case change
+               :created (element-created store data)
+               :updated (element-updated store data)
+               :deleted (element-deleted store (:id data)))
+    :connection (connection-changed store change data)
+    :connection-derivations (connection-derivations-updated store data)
+    :timeline (timeline-changed store change data)
+    :swimlane (swimlane-changed store change data)
+    :slice (slice-changed store change data)
+    :placement (placement-changed store change data)
+    :specification (specification-changed store change data)
+    :spec-step (spec-step-changed store change data)
+    (invalid-delta-received store delta)))
+
+(defn apply-delta-batch
+  "Applies every change in one SSE delta event, in order, as a single unit --
+   a cascading delete or DeleteSwimlane's un-assign-then-delete arrive as
+   several changes that must land together (see em-frontend.stream/normalize-changes)."
+  [store changes]
+  (reduce (fn [{s :store fx :effects} change]
+            (let [{s' :store fx' :effects} (apply-delta s change)]
+              {:store s' :effects (into fx fx')}))
+          {:store store :effects []}
+          changes))
+
+(defn ingest-delta
+  "rule UserInteractionDefers: while Visualization.interacting, every delta
+   (a whole batch of changes from one SSE event) is held in :delta-queue
+   rather than applied. em-frontend.interaction flushes the queue, in
+   order, via `apply-delta-batch` on InteractionEndFlushesQueue."
+  [store changes]
+  (if (get-in store [:visualization :interacting])
+    {:store (update store :delta-queue conj changes)
+     :effects [{:type :delta-queued :delta changes}]}
+    (apply-delta-batch store changes)))

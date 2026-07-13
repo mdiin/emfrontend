@@ -1,0 +1,58 @@
+(ns em-frontend.layout-test
+  "spec: the canonical layout convention -- slices are columns ordered by
+   index, swimlanes are rows (row 0 = default unnamed band), one card rect
+   per placement."
+  (:require [cljd.test :refer [deftest is testing]]
+            [em-frontend.layout :as layout]))
+
+(deftest swimlane-row-index-test
+  (testing "unassigned (nil) swimlane goes to the default row 0"
+    (is (= 0 (layout/swimlane-row-index [:sw1 :sw2] nil))))
+  (testing "named swimlanes occupy rows 1.. in declared order"
+    (is (= 1 (layout/swimlane-row-index [:sw1 :sw2] :sw1)))
+    (is (= 2 (layout/swimlane-row-index [:sw1 :sw2] :sw2))))
+  (testing "an unknown swimlane id falls back to the default row rather than throwing"
+    (is (= 0 (layout/swimlane-row-index [:sw1] :not-a-swimlane)))))
+
+(deftest layout-timeline-column-ordering-test
+  (testing "slices become columns ordered left-to-right by index, regardless of input order"
+    (let [slices [{:id :s2 :index 1} {:id :s1 :index 0}]
+          result (layout/layout-timeline {:slices slices :placements [] :elements {} :swimlane-order []})
+          headers (into {} (map (juxt :slice-id :index)) (:slice-headers result))]
+      (is (= {:s1 0 :s2 1} headers)))))
+
+(deftest layout-timeline-placement-cell-test
+  (testing "a placement's cell is (its slice's column, its element's swimlane row)"
+    (let [slices [{:id :s1 :index 0} {:id :s2 :index 1}]
+          elements {:e1 {:swimlane :sw1}}
+          placements [{:id :p1 :slice :s2 :element :e1}]
+          result (layout/layout-timeline {:slices slices :placements placements
+                                           :elements elements :swimlane-order [:sw1]})
+          cell (first (:placements result))]
+      (is (= 1 (:col cell)))
+      (is (= 1 (:row cell))))))
+
+(deftest layout-timeline-duplicate-placement-test
+  (testing "an element placed twice yields two separate cards, never collapsed"
+    (let [slices [{:id :s1 :index 0} {:id :s2 :index 1}]
+          elements {:e1 {:swimlane nil}}
+          placements [{:id :p1 :slice :s1 :element :e1} {:id :p2 :slice :s2 :element :e1}]
+          result (layout/layout-timeline {:slices slices :placements placements
+                                           :elements elements :swimlane-order []})]
+      (is (= 2 (count (:placements result)))))))
+
+(deftest layout-timeline-placement-with-unknown-slice-test
+  (testing "a placement referencing a slice outside this timeline's slice set is dropped,
+            not crashed on -- build-timeline-render-model only ever passes this timeline's own slices"
+    (let [result (layout/layout-timeline {:slices [{:id :s1 :index 0}]
+                                           :placements [{:id :p1 :slice :not-in-this-timeline :element :e1}]
+                                           :elements {:e1 {}} :swimlane-order []})]
+      (is (= 0 (count (:placements result)))))))
+
+(deftest layout-timeline-size-scales-with-content-test
+  (testing "table size grows with slice count and swimlane count"
+    (let [one-slice (layout/layout-timeline {:slices [{:id :s1 :index 0}] :placements []
+                                              :elements {} :swimlane-order []})
+          two-slices (layout/layout-timeline {:slices [{:id :s1 :index 0} {:id :s2 :index 1}] :placements []
+                                               :elements {} :swimlane-order []})]
+      (is (< (get-in one-slice [:size :width]) (get-in two-slices [:size :width]))))))
