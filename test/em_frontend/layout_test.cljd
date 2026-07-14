@@ -30,7 +30,20 @@
                                            :elements elements :swimlane-order [:sw1]})
           cell (first (:placements result))]
       (is (= 1 (:col cell)))
-      (is (= 1 (:row cell))))))
+      ;; :sw1 is the only row actually holding a placement, so it compacts to row 0
+      (is (= 0 (:row cell))))))
+
+(deftest layout-timeline-unused-swimlanes-are-skipped-test
+  (testing "a swimlane row with no placements never reserves a band -- only
+            rows actually holding a placement in this timeline appear"
+    (let [slices [{:id :s1 :index 0}]
+          elements {:e1 {:swimlane :sw2}}
+          placements [{:id :p1 :slice :s1 :element :e1}]
+          result (layout/layout-timeline {:slices slices :placements placements
+                                           :elements elements :swimlane-order [:sw1 :sw2 :sw3]})]
+      (is (= 1 (count (:swimlane-bands result))))
+      (is (= :sw2 (:swimlane-id (first (:swimlane-bands result)))))
+      (is (= 0 (:row (first (:placements result))))))))
 
 (deftest layout-timeline-duplicate-placement-test
   (testing "an element placed twice yields two separate cards, never collapsed"

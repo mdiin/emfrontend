@@ -33,17 +33,25 @@
    slices/placements/elements are scoped to this one timeline already.
    out: per-placement cell rects (one per placement -- an element placed
    twice renders twice, never collapsed), per-slice column header rects,
-   per-swimlane-row band rects, and the table's total size."
+   per-swimlane-row band rects, and the table's total size.
+   Rows are compacted to only the swimlanes (and the default unnamed band)
+   that actually hold a placement in this timeline -- an unused swimlane
+   never reserves a blank row."
   [{:keys [slices placements elements swimlane-order]}]
   (let [ordered-slices (sort-by :index slices)
         col-index (into {} (map-indexed (fn [i s] [(:id s) i])) ordered-slices)
-        row-count (inc (count swimlane-order))
-        placement-cells
+        placement-raw-rows
         (for [p placements
               :let [element (get elements (:element p))
-                    col (get col-index (:slice p))
-                    row (swimlane-row-index swimlane-order (:swimlane element))]
+                    col (get col-index (:slice p))]
               :when (some? col)]
+          [p col (swimlane-row-index swimlane-order (:swimlane element))])
+        used-raw-rows (vec (sort (distinct (map peek placement-raw-rows))))
+        compacted-row (into {} (map-indexed (fn [i r] [r i])) used-raw-rows)
+        row-count (count used-raw-rows)
+        placement-cells
+        (for [[p col raw-row] placement-raw-rows
+              :let [row (get compacted-row raw-row)]]
           {:placement-id (:id p)
            :element-id (:element p)
            :col col :row row
@@ -58,8 +66,10 @@
                   :width slice-width :height slice-header-height}})
         table-width (+ swimlane-label-width (* (count ordered-slices) slice-width))
         swimlane-bands
-        (for [row (range row-count)]
+        (for [raw-row used-raw-rows
+              :let [row (get compacted-row raw-row)]]
           {:row row
+           :swimlane-id (when (pos? raw-row) (nth swimlane-order (dec raw-row) nil))
            :rect {:x 0.0 :y (+ slice-header-height (* row swimlane-row-height))
                   :width table-width :height swimlane-row-height}})]
     {:placements placement-cells

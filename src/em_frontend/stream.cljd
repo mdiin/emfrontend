@@ -81,7 +81,7 @@
    :derivations (mapv norm-field-derivation (or (get m "derivations") []))})
 
 (defn- norm-swimlane [m]
-  {:id (get m "id") :name (get m "name")})
+  {:id (get m "id") :name (get m "name") :index (get m "index")})
 
 (defn- norm-spec-step [m spec-id]
   {:id (get m "id")

@@ -30,8 +30,8 @@
            .children
            [(m/Text (:name element) .style (m/TextStyle .fontWeight m/FontWeight.bold .fontSize 16.0))
             (m/IconButton .icon (m/Icon m/Icons.close) .onPressed (fn [] (on-close) nil))])
-         (m/Text (str "kind: " (name (:kind element))))
-         (m/Text (str "context: " (name (:context element))))
+         (m/Text (str "kind: " (if (some? (:kind element)) (name (:kind element)) "(unknown)")))
+         (m/Text (str "context: " (if (some? (:context element)) (name (:context element)) "(unknown)")))
          (if (some? (:swimlane element))
            (m/Text (str "swimlane: " (:swimlane element)))
            (m/Text "swimlane: (unassigned)"))

@@ -18,10 +18,16 @@
             [em-frontend.edges :as edges]))
 
 (def slice-status-fill
-  {:created m/Colors.blue.shade50
-   :in_progress m/Colors.amber.shade50
-   :done m/Colors.green.shade50
-   :informational m/Colors.grey.shade200})
+  {:created m/Colors.blue.shade200
+   :in_progress m/Colors.amber.shade200
+   :done m/Colors.green.shade200
+   :informational m/Colors.grey.shade300})
+
+(def slice-status-border
+  {:created m/Colors.blue.shade600
+   :in_progress m/Colors.amber.shade800
+   :done m/Colors.green.shade700
+   :informational m/Colors.grey.shade600})
 
 (def element-kind-color
   {:command m/Colors.blue
@@ -44,6 +50,40 @@
 (defn- rect->m [{:keys [x y width height]}]
   (m/Rect.fromLTWH x y width height))
 
+(defn edge-endpoints
+  "The (x1 y1 x2 y2) anchor points an edge between two placement rects draws
+   between. Same-column pairs (a slice's own command->event, stacked across
+   swimlane rows) connect vertically, top rect's bottom-mid to bottom rect's
+   top-mid -- routing them right-edge-to-left-edge like a cross-column edge
+   would draw a near-vertical diagonal cutting across the whole card width.
+   Everything else follows ConnectionsRenderRightToLeft: from's right-mid to
+   to's left-mid."
+  [from-rect to-rect]
+  (if (< (abs (- (:x from-rect) (:x to-rect))) 1.0)
+    (if (< (:y from-rect) (:y to-rect))
+      [(+ (:x from-rect) (/ (:width from-rect) 2)) (+ (:y from-rect) (:height from-rect))
+       (+ (:x to-rect) (/ (:width to-rect) 2)) (:y to-rect)]
+      [(+ (:x from-rect) (/ (:width from-rect) 2)) (:y from-rect)
+       (+ (:x to-rect) (/ (:width to-rect) 2)) (+ (:y to-rect) (:height to-rect))])
+    [(+ (:x from-rect) (:width from-rect)) (+ (:y from-rect) (/ (:height from-rect) 2))
+     (:x to-rect) (+ (:y to-rect) (/ (:height to-rect) 2))]))
+
+(defn- draw-arrowhead
+  "A small filled triangle pointing along (from -> to), tip at `to`."
+  [^m/Canvas canvas ^double from-x ^double from-y ^double to-x ^double to-y ^m/Color color]
+  (let [angle (math/atan2 (- to-y from-y) (- to-x from-x))
+        size 9.0
+        spread 0.45
+        wing (fn [a] (m/Offset (- to-x (* size (math/cos (+ angle a))))
+                                (- to-y (* size (math/sin (+ angle a))))))
+        p1 (wing spread) p2 (wing (- spread))
+        path (doto (m/Path)
+               (.moveTo to-x to-y)
+               (.lineTo (.-dx p1) (.-dy p1))
+               (.lineTo (.-dx p2) (.-dy p2))
+               (.close))]
+    (.drawPath canvas path (fill-paint color))))
+
 (defn- draw-text [^m/Canvas canvas ^String text ^double x ^double y ^m/TextStyle style ^double max-width]
   (let [tp (m/TextPainter
              .text (m/TextSpan .text text .style style)
@@ -64,7 +104,7 @@
   (let [slices (filterv #(= (:timeline %) timeline-id) (vals (:slices store-val)))
         slice-ids (into #{} (map :id) slices)
         placements (filterv #(slice-ids (:slice %)) (vals (:placements store-val)))
-        swimlane-order (vec (keys (:swimlanes store-val)))
+        swimlane-order (mapv :id (sort-by :index (vals (:swimlanes store-val))))
         lay (layout/layout-timeline {:slices slices :placements placements
                                       :elements (:elements store-val)
                                       :swimlane-order swimlane-order})
@@ -99,20 +139,21 @@
    connection-visual, a {connection-id -> :highlighted|:dimmed} map (see
    em-frontend.interaction/select-field-for-trace; absent means :normal)."
   ^m/CustomPainter
-  [{:keys [layout slices swimlanes swimlane-order elements edges connection-visual]}]
+  [{:keys [layout slices swimlanes elements edges connection-visual]}]
   (reify :extends m/CustomPainter
     (paint [this ^m/Canvas canvas ^m/Size size]
-      (doseq [{:keys [row rect]} (:swimlane-bands layout)]
+      (doseq [{:keys [rect swimlane-id]} (:swimlane-bands layout)]
         (.drawRect canvas (rect->m rect) (fill-paint m/Colors.grey.shade50))
-        (when (pos? row)
-          (when-some [sw (get swimlanes (nth swimlane-order (dec row) nil))]
-            (draw-text canvas (or (:name sw) "") 4.0 (+ (:y rect) 8.0)
-                       (m/TextStyle .fontSize 11.0 .fontWeight m/FontWeight.w500)
-                       (- layout/swimlane-label-width 8.0)))))
+        (when-some [sw (get swimlanes swimlane-id)]
+          (draw-text canvas (or (:name sw) "") 4.0 (+ (:y rect) 8.0)
+                     (m/TextStyle .fontSize 11.0 .fontWeight m/FontWeight.w500)
+                     (- layout/swimlane-label-width 8.0))))
       (doseq [{:keys [slice-id rect]} (:slice-headers layout)
               :let [slice (get slices slice-id)]]
         (.drawRect canvas (rect->m rect)
-                   (fill-paint (get slice-status-fill (:status slice) m/Colors.white)))
+                   (fill-paint (get slice-status-fill (:status slice) m/Colors.grey.shade100)))
+        (.drawRect canvas (rect->m (assoc rect :y (- (+ (:y rect) (:height rect)) 3.0) :height 3.0))
+                   (fill-paint (get slice-status-border (:status slice) m/Colors.grey.shade600)))
         (draw-text canvas (or (:title slice) "") (+ (:x rect) 8.0) (+ (:y rect) 8.0)
                    (m/TextStyle .fontWeight m/FontWeight.bold .fontSize 13.0)
                    (- (:width rect) 16.0)))
@@ -123,10 +164,9 @@
                             :dimmed m/Colors.grey.shade300
                             m/Colors.blueGrey)
                     width (if (= visual :highlighted) 2.5 1.0)
-                    from-pt (m/Offset (+ (:x from-rect) (:width from-rect))
-                                       (+ (:y from-rect) (/ (:height from-rect) 2)))
-                    to-pt (m/Offset (:x to-rect) (+ (:y to-rect) (/ (:height to-rect) 2)))]]
-        (.drawLine canvas from-pt to-pt (stroke-paint color width)))
+                    [fx fy tx ty] (edge-endpoints from-rect to-rect)]]
+        (.drawLine canvas (m/Offset fx fy) (m/Offset tx ty) (stroke-paint color width))
+        (draw-arrowhead canvas fx fy tx ty color))
       (doseq [{:keys [element-id rect]} (:placements layout)
               :let [element (get elements element-id)
                     incomplete (false? (:is_information_complete element))
@@ -183,10 +223,7 @@
   [edges ^m/Offset point threshold]
   (let [x (.-dx point) y (.-dy point)]
     (some (fn [{:keys [connection-id from-rect to-rect]}]
-            (let [x1 (+ (:x from-rect) (:width from-rect))
-                  y1 (+ (:y from-rect) (/ (:height from-rect) 2))
-                  x2 (:x to-rect)
-                  y2 (+ (:y to-rect) (/ (:height to-rect) 2))]
+            (let [[x1 y1 x2 y2] (edge-endpoints from-rect to-rect)]
               (when (<= (point-segment-distance x y x1 y1 x2 y2) threshold)
                 connection-id)))
           edges)))

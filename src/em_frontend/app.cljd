@@ -15,7 +15,10 @@
    config/CLI surface here yet to override it, since the spec doesn't cover
    deployment configuration."
   (:require ["package:flutter/material.dart" :as m]
+            ["package:flutter/gestures.dart" :as g]
+            ["dart:math" :as math]
             [cljd.flutter :as f]
+            [em-frontend.config :as config]
             [em-frontend.store :as store]
             [em-frontend.stream :as stream]
             [em-frontend.interaction :as interaction]
@@ -72,28 +75,59 @@
       .child
       (m/CustomPaint .size (m/Size (:width size) (:height size)) .painter painter))))
 
-(defn- canvas-body [st ui store-atom ui-atom last-scale]
+(defn- clamp [v lo hi] (max lo (min hi v)))
+
+(defn- apply-wheel-zoom!
+  "Mouse-wheel zoom, centred on the pointer: scales `transform-controller`'s
+   matrix around the event's local position, clamped to config's zoom bounds."
+  [^m/TransformationController transform-controller store-atom ^double scroll-dy ^m/Offset local]
+  (let [cur-scale (.getMaxScaleOnAxis (.-value transform-controller))
+        raw-factor (math/pow 1.0015 (- scroll-dy))
+        factor (clamp raw-factor (/ config/min-zoom cur-scale) (/ config/max-zoom cur-scale))]
+    (when (not= factor 1.0)
+      (let [mat (.clone (.-value transform-controller))]
+        (.translate mat (.-dx local) (.-dy local))
+        (.scale mat ^double factor)
+        (.translate mat (- (.-dx local)) (- (.-dy local)))
+        (.-value! transform-controller mat))
+      (swap! store-atom #(:store (interaction/zoom % factor))))))
+
+(defn- canvas-body [st ui store-atom ui-atom last-scale transform-controller]
   (let [filtered (get-in st [:visualization :filtered_timeline])
         timeline-ids (if (some? filtered) [filtered] (keys (:timelines st)))]
-    (m/InteractiveViewer
-      .onInteractionStart
-      (fn [_] (reset! last-scale 1.0) (swap! store-atom #(:store (interaction/begin-interaction %))) nil)
-      .onInteractionEnd
-      (fn [_] (swap! store-atom #(:store (interaction/end-interaction %))) nil)
-      .onInteractionUpdate
-      (fn [^m/ScaleUpdateDetails details]
-        (let [delta (.-focalPointDelta details)
-              cur-scale (.-scale details)
-              zoom-ratio (/ cur-scale @last-scale)]
-          (reset! last-scale cur-scale)
-          (swap! store-atom #(:store (interaction/pan % (.-dx delta) (.-dy delta))))
-          (when (not= zoom-ratio 1.0)
-            (swap! store-atom #(:store (interaction/zoom % zoom-ratio)))))
+    (m/Listener
+      .onPointerSignal
+      (fn [^g/PointerSignalEvent event]
+        (when (instance? g/PointerScrollEvent event)
+          (apply-wheel-zoom! transform-controller store-atom
+                              (.-dy (.-scrollDelta ^g/PointerScrollEvent event))
+                              (.-localPosition ^g/PointerScrollEvent event)))
         nil)
       .child
-      (m/Column
-        .mainAxisSize m/MainAxisSize.min
-        .children (mapv #(timeline-widget st ui store-atom ui-atom %) timeline-ids)))))
+      (m/InteractiveViewer
+        .transformationController transform-controller
+        .constrained false
+        .boundaryMargin (m/EdgeInsets.all 400.0)
+        .minScale config/min-zoom
+        .maxScale config/max-zoom
+        .onInteractionStart
+        (fn [_] (reset! last-scale 1.0) (swap! store-atom #(:store (interaction/begin-interaction %))) nil)
+        .onInteractionEnd
+        (fn [_] (swap! store-atom #(:store (interaction/end-interaction %))) nil)
+        .onInteractionUpdate
+        (fn [^m/ScaleUpdateDetails details]
+          (let [delta (.-focalPointDelta details)
+                cur-scale (.-scale details)
+                zoom-ratio (/ cur-scale @last-scale)]
+            (reset! last-scale cur-scale)
+            (swap! store-atom #(:store (interaction/pan % (.-dx delta) (.-dy delta))))
+            (when (not= zoom-ratio 1.0)
+              (swap! store-atom #(:store (interaction/zoom % zoom-ratio)))))
+          nil)
+        .child
+        (m/Column
+          .mainAxisSize m/MainAxisSize.min
+          .children (mapv #(timeline-widget st ui store-atom ui-atom %) timeline-ids))))))
 
 ;; == Overlays: field-flow banner, error banner, selection panels ============
 
@@ -104,14 +138,14 @@
     .child (m/Padding .padding (m/EdgeInsets.all 8.0)
              .child (m/Text "Stream connection lost -- last known state shown below."))))
 
-(defn- overlay-stack [st ui store-atom ui-atom last-scale]
+(defn- overlay-stack [st ui store-atom ui-atom last-scale transform-controller]
   (m/Stack
     .children
     (filterv some?
       [(case (get-in st [:visualization :state])
          :empty (m/Center .child (m/Text "No timelines yet"))
-         :rendered (canvas-body st ui store-atom ui-atom last-scale)
-         :error (canvas-body st ui store-atom ui-atom last-scale)
+         :rendered (canvas-body st ui store-atom ui-atom last-scale transform-controller)
+         :error (canvas-body st ui store-atom ui-atom last-scale transform-controller)
          ;; nil (no snapshot yet) and :loading both show the spinner
          (m/Center .child (m/CircularProgressIndicator)))
 
@@ -187,6 +221,7 @@
                              :selected-connection nil :expanded-slices #{}})
               :dispose nil]
     :managed [last-scale (atom 1.0) :dispose nil]
+    :managed [transform-controller (m/TransformationController)]
     :managed [_ (stream/connect! stream-url
                   (fn [s] (apply-outcome! store-atom ui-atom (store/set-sse-state @store-atom s)))
                   (fn [seed] (apply-outcome! store-atom ui-atom (store/snapshot-received @store-atom seed)))
@@ -199,6 +234,6 @@
     .home
     (m/Scaffold
       .appBar (app-bar st store-atom ui-atom)
-      .body (overlay-stack st ui store-atom ui-atom last-scale))))
+      .body (overlay-stack st ui store-atom ui-atom last-scale transform-controller))))
 
 (defn main [] (f/run (root)))
