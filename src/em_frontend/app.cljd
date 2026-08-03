@@ -31,6 +31,8 @@
 
 (def stream-url "http://localhost:8090/stream")
 
+(def ^:private ^m/GlobalKey viewport-key (f/global-key ::viewport))
+
 (defn- apply-outcome!
   "Applies a {:store :effects} rule result: swaps the domain store, and
    folds ConnectionHighlighted/ConnectionDimmed effects into ui-atom's
@@ -95,6 +97,41 @@
         (.-value! transform-controller mat))
       (swap! store-atom #(:store (interaction/zoom % factor))))))
 
+(defn- content-extent
+  "Total laid-out size of the WHOLE model -- every timeline, filter or not,
+   matching canvas-body's unfiltered Column: stacked, so height sums and
+   width is the widest one. Feeds interaction/snap-to-content's
+   content-width/height (rule ViewportSnapsToContent's content_fit_zoom/
+   content_center_pan_x/content_center_pan_y)."
+  [st]
+  (reduce
+    (fn [{:keys [width height]} timeline-id]
+      (let [size (get-in (canvas/build-timeline-render-model st timeline-id) [:layout :size])]
+        {:width (max width (:width size)) :height (+ height (:height size))}))
+    {:width 0.0 :height 0.0}
+    (keys (:timelines st))))
+
+(defn- snap-to-content!
+  "Fits + centers the whole model in the viewport (rule
+   ViewportSnapsToContent): measures the laid-out content extent and the
+   InteractiveViewer's own rendered size, hands both to the pure store
+   transform, then drives transform-controller directly since it -- not the
+   mirrored store fields -- is what actually renders the pan/zoom."
+  [store-atom ui-atom ^m/TransformationController transform-controller]
+  (let [st @store-atom
+        {:keys [width height]} (content-extent st)
+        ^m/Element ctx (.-currentContext viewport-key)]
+    (when (some? ctx)
+      (let [^m/RenderBox box (.-renderObject ctx)
+            ^m/Size size (.-size box)
+            outcome (interaction/snap-to-content st width height (.-width size) (.-height size))
+            {:keys [zoom pan_x pan_y]} (:visualization (:store outcome))
+            mat (doto (m/Matrix4.identity)
+                  (.translate pan_x pan_y)
+                  (.scale ^double zoom))]
+        (apply-outcome! store-atom ui-atom outcome)
+        (.-value! transform-controller mat)))))
+
 (defn- canvas-body [st ui store-atom ui-atom last-scale transform-controller]
   (let [filtered (get-in st [:visualization :filtered_timeline])
         timeline-ids (if (some? filtered) [filtered] (keys (:timelines st)))]
@@ -108,9 +145,15 @@
         nil)
       .child
       (m/InteractiveViewer
+        .key viewport-key
         .transformationController transform-controller
         .constrained false
-        .boundaryMargin (m/EdgeInsets.all 400.0)
+        ;; Pan/zoom are always available (rule ViewportPans/ViewportZooms,
+        ;; neither filter-gated) -- an infinite boundary is what makes that
+        ;; true regardless of content size: a finite margin lets Flutter
+        ;; lock an axis outright once content+margin no longer exceeds the
+        ;; viewport, e.g. right after filtering down to one small timeline.
+        .boundaryMargin (m/EdgeInsets.all double/infinity)
         .minScale config/min-zoom
         .maxScale config/max-zoom
         .onInteractionStart
@@ -212,9 +255,14 @@
 
 ;; == Root ======================================================================
 
-(defn- app-bar [st store-atom ui-atom]
+(defn- app-bar [st store-atom ui-atom transform-controller]
   (m/AppBar
     .title (m/Text (or (get-in st [:event-model :name]) "Event Model Visualization"))
+    .actions
+    [(m/IconButton
+       .icon (m/Icon m/Icons.fit_screen)
+       .tooltip "Snap to content"
+       .onPressed (fn [] (snap-to-content! store-atom ui-atom transform-controller) nil))]
     .bottom
     (m/PreferredSize
       .preferredSize (m/Size.fromHeight 40.0)
@@ -255,7 +303,7 @@
     (m/MaterialApp .title "Event Model Visualization" .debugShowCheckedModeBanner false)
     .home
     (m/Scaffold
-      .appBar (app-bar st store-atom ui-atom)
+      .appBar (app-bar st store-atom ui-atom transform-controller)
       .body (overlay-stack st ui store-atom ui-atom last-scale transform-controller))))
 
 (defn main [] (f/run (root)))

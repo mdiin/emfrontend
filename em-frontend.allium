@@ -617,7 +617,6 @@ rule InteractionEnds {
 -- pan_x and pan_y are the cumulative delta from the start of the gesture.
 rule ViewportPans {
   when: Pan(viewer, viz, pan_x, pan_y)
-  requires: viz.filtered_timeline = null
   ensures:
     viz.pan_x = viz.pan_x + pan_x
     viz.pan_y = viz.pan_y + pan_y
@@ -639,6 +638,32 @@ rule ViewportZooms {
 rule ViewportResizes {
   when: ResizeViewport(viewer, viz, width, height)
   ensures: CanvasResized(width: width, height: height)
+}
+
+-- Snapping to content brings the whole model into view: zoom is set so all the
+-- laid-out content fits the viewport at once, and pan is set so that content
+-- sits centred in it. The fit is over the entire model, so an active timeline
+-- filter is cleared first (otherwise the fit would be computed against a visible
+-- subset) and the restored timelines animate back in, mirroring
+-- TimelineFilterCleared. The fitted zoom is clamped to
+-- [config.min_zoom, config.max_zoom] on the same basis as ViewportZooms; where
+-- the clamp binds, not all content fits and the centring is against the clamped
+-- zoom. How the content extent is measured is a renderer concern, as with the
+-- rest of the layout geometry: the spec states what the viewport must show, not
+-- the arithmetic that gets it there.
+rule ViewportSnapsToContent {
+  when: SnapToContent(viewer, viz)
+  let model = EventModel
+  let was_filtered = viz.filtered_timeline != null
+  let fitted_zoom = clamp(content_fit_zoom(model), config.min_zoom, config.max_zoom)
+  ensures:
+    viz.filtered_timeline = null
+    viz.zoom = fitted_zoom
+    viz.pan_x = content_center_pan_x(model, fitted_zoom)
+    viz.pan_y = content_center_pan_y(model, fitted_zoom)
+    if was_filtered:
+      for t in Timelines:
+        TimelineAppears(timeline: t)
 }
 
 -- When interaction ends, the held deltas are flushed and applied in order.
@@ -961,9 +986,12 @@ surface Viewport {
   provides:
     BeginInteraction(viewer, viz)
     EndInteraction(viewer, viz)
-    -- Pan is disabled when a timeline filter is active (filtered view scrolls within one row).
-    Pan(viewer, viz, pan_x, pan_y) when viz.filtered_timeline = null
+    -- Pan and zoom are always available, filtered view or not.
+    Pan(viewer, viz, pan_x, pan_y)
     Zoom(viewer, viz, zoom)
+    -- Fits and centres the entire model in the viewport; clears any timeline
+    -- filter first, so the fit is over the whole model rather than the subset.
+    SnapToContent(viewer, viz)
     -- Browser window resize; resizes the rendering viewport only, not layout.
     ResizeViewport(viewer, viz, width, height)
 }

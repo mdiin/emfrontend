@@ -38,15 +38,12 @@
 
 (defn pan
   "rule ViewportPans: pan_x/pan_y are the cumulative delta from gesture
-   start, not an absolute set. Disabled while a timeline filter is active
-   (the Viewport surface's `when viz.filtered_timeline = null` guard)."
+   start, not an absolute set. Always available, filtered view or not."
   [store dx dy]
-  (if (nil? (get-in store [:visualization :filtered_timeline]))
-    {:store (-> store
-                (update-in [:visualization :pan_x] + dx)
-                (update-in [:visualization :pan_y] + dy))
-     :effects []}
-    {:store store :effects []}))
+  {:store (-> store
+              (update-in [:visualization :pan_x] + dx)
+              (update-in [:visualization :pan_y] + dy))
+   :effects []})
 
 (defn zoom
   "rule ViewportZooms: multiplicative, clamped to [config/min-zoom, config/max-zoom]."
@@ -59,6 +56,34 @@
   "rule ViewportResizes: pure renderer concern, no entity state changes."
   [store width height]
   {:store store :effects [{:type :canvas-resized :width width :height height}]})
+
+(defn snap-to-content
+  "rule ViewportSnapsToContent: fits + centers the ENTIRE model, clearing any
+   active timeline filter first (the fit is over the whole model, never a
+   filtered subset). content-width/height and viewport-width/height are the
+   renderer's own measurements (em-frontend.canvas/layout content extent, the
+   InteractiveViewer's own rendered size) -- content_fit_zoom/
+   content_center_pan_x/content_center_pan_y in the spec, which deliberately
+   leaves that arithmetic unspecified. An empty model (no laid-out content)
+   resets to config's defaults rather than dividing by zero."
+  [store content-width content-height viewport-width viewport-height]
+  (let [was-filtered (some? (get-in store [:visualization :filtered_timeline]))
+        empty-content (or (zero? content-width) (zero? content-height))
+        fitted-zoom (if empty-content
+                      config/default-zoom
+                      (clamp (min (/ viewport-width content-width) (/ viewport-height content-height))
+                             config/min-zoom config/max-zoom))
+        pan-x (if empty-content config/default-pan-x (/ (- viewport-width (* content-width fitted-zoom)) 2))
+        pan-y (if empty-content config/default-pan-y (/ (- viewport-height (* content-height fitted-zoom)) 2))
+        store' (-> store
+                   (assoc-in [:visualization :filtered_timeline] nil)
+                   (assoc-in [:visualization :zoom] fitted-zoom)
+                   (assoc-in [:visualization :pan_x] pan-x)
+                   (assoc-in [:visualization :pan_y] pan-y))]
+    {:store store'
+     :effects (if was-filtered
+                (mapv (fn [tid] {:type :timeline-appears :timeline tid}) (keys (:timelines store)))
+                [])}))
 
 ;; == TimelineFilter surface ===================================================
 

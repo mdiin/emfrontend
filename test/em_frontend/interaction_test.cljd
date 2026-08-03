@@ -72,11 +72,12 @@
       (is (= 15.0 (get-in store [:visualization :pan_x])))
       (is (= -3.0 (get-in store [:visualization :pan_y]))))))
 
-(deftest viewport-pan-disabled-when-filtered-test
-  (testing "Viewport surface: Pan(...) when viz.filtered_timeline = null -- disabled while filtered"
+(deftest viewport-pans-while-filtered-test
+  (testing "rule ViewportPans: never filter-gated -- pan stays available while filtered"
     (let [store (assoc-in (base-store) [:visualization :filtered_timeline] :t1)
           {:keys [store]} (interaction/pan store 5.0 5.0)]
-      (is (= 0.0 (get-in store [:visualization :pan_x]))))))
+      (is (= 5.0 (get-in store [:visualization :pan_x])))
+      (is (= 5.0 (get-in store [:visualization :pan_y]))))))
 
 (deftest viewport-zooms-clamped-test
   (testing "rule ViewportZooms: multiplicative, clamped to [config/min-zoom, config/max-zoom]"
