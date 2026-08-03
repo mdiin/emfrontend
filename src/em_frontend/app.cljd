@@ -37,13 +37,16 @@
    transient connection-visual map (em-frontend.canvas's edge styling) --
    the one piece of render-relevant state the spec models purely as
    one-shot effects rather than stored fields (see em-frontend.interaction's
-   select-field-for-trace docstring)."
+   select-field-for-trace docstring). InvalidDataIndicatorShown is folded in
+   the same way, into :invalid-data, so rule InvalidDataVisible's payload is
+   surfaced rather than silently dropped."
   [store-atom ui-atom {:keys [store effects]}]
   (reset! store-atom store)
   (doseq [fx effects]
     (case (:type fx)
       :connection-highlighted (swap! ui-atom assoc-in [:connection-visual (:connection fx)] :highlighted)
       :connection-dimmed (swap! ui-atom assoc-in [:connection-visual (:connection fx)] :dimmed)
+      :invalid-data-indicator-shown (swap! ui-atom assoc :invalid-data (:delta fx))
       nil)))
 
 ;; == Canvas: per-timeline hit-testing + the whole-canvas InteractiveViewer ===
@@ -138,6 +141,20 @@
     .child (m/Padding .padding (m/EdgeInsets.all 8.0)
              .child (m/Text "Stream connection lost -- last known state shown below."))))
 
+(defn- invalid-data-banner
+  "rule InvalidDataVisible: the rest of the store is left intact, this is
+   just a dismissible notice that one stream payload couldn't be applied."
+  [{:keys [on-close]}]
+  (m/Material
+    .color m/Colors.amber.shade50
+    .elevation 2.0
+    .child (m/Padding .padding (m/EdgeInsets.all 8.0)
+             .child (m/Row
+                      .mainAxisSize m/MainAxisSize.min
+                      .children
+                      [(m/Text "Received invalid data from the stream -- ignored.")
+                       (m/IconButton .icon (m/Icon m/Icons.close) .onPressed on-close)]))))
+
 (defn- overlay-stack [st ui store-atom ui-atom last-scale transform-controller]
   (m/Stack
     .children
@@ -151,6 +168,11 @@
 
        (when (= (get-in st [:visualization :state]) :error)
          (m/Align .alignment m/Alignment.topCenter .child (error-banner)))
+
+       (when (:invalid-data ui)
+         (m/Align .alignment m/Alignment.bottomLeft
+           .child (invalid-data-banner
+                    {:on-close (fn [] (swap! ui-atom dissoc :invalid-data))})))
 
        (when (pos? (count (get-in st [:visualization :highlighted_path] #{})))
          (m/Align .alignment m/Alignment.topCenter

@@ -255,42 +255,50 @@
                             {:entity :change :data} changes to apply atomically
      (on-invalid raw)       a payload that failed to parse/validate
    Never returns under normal operation; only settles once the state
-   reaches the terminal :error (max-attempts exhausted)."
+   reaches the terminal :error -- reachable only after max-attempts
+   CONSECUTIVE failed connection attempts (a successful :connected resets
+   the count), never merely cumulative over the process's lifetime."
   [stream-url on-sse-state on-snapshot on-delta on-invalid]
-  (loop [attempt 0 first-event? true]
+  (loop [attempt 0]
     (on-sse-state (if (zero? attempt) :connecting :reconnecting))
-    (let [outcome
-          (try
-            (let [client (http/Client)
-                  request (http/Request "GET" (Uri/parse stream-url))
-                  ^http/StreamedResponse response (await (.send client request))
-                  lines (-> (.-stream response)
-                            (.transform (.-decoder convert/utf8))
-                            (.transform (convert/LineSplitter)))
-                  payloads (sse-payloads lines)
-                  first? (atom first-event?)
-                  done (async/Completer)]
-              (on-sse-state :connected)
-              (.listen payloads
-                (fn [^String raw]
-                  (if @first?
-                    (do (reset! first? false) (on-snapshot (normalize-snapshot raw)))
-                    (if-some [changes (normalize-changes raw)]
-                      (on-delta changes)
-                      (on-invalid raw))))
-                .onDone (fn [] (.complete done nil))
-                .onError (fn [e] (.complete done nil)))
-              (await (.-future done))
-              :dropped)
-            (catch Object _ :failed))]
-      (when (= outcome :dropped)
-        ;; A clean stream end still means the connection was lost; keep
-        ;; retrying rather than settling, so :error stays reachable only
-        ;; through repeated failure (reconnecting -> error is terminal).
-        nil)
-      (let [next-attempt (inc attempt)]
+    (let [connected? (atom false)]
+      (try
+        (let [client (http/Client)
+              request (http/Request "GET" (Uri/parse stream-url))
+              ^http/StreamedResponse response (await (.send client request))
+              lines (-> (.-stream response)
+                        (.transform (.-decoder convert/utf8))
+                        (.transform (convert/LineSplitter)))
+              payloads (sse-payloads lines)
+              first? (atom true)
+              done (async/Completer)]
+          (on-sse-state :connected)
+          (reset! connected? true)
+          (.listen payloads
+            (fn [^String raw]
+              (try
+                (if @first?
+                  (do (reset! first? false) (on-snapshot (normalize-snapshot raw)))
+                  (if-some [changes (normalize-changes raw)]
+                    (on-delta changes)
+                    (on-invalid raw)))
+                (catch Object _
+                  ;; A snapshot/delta that throws mid-parse (rather than
+                  ;; just failing to normalize) must still complete `done`,
+                  ;; or the reconnect loop below stalls forever awaiting it.
+                  (on-invalid raw)
+                  (.complete done nil))))
+            .onDone (fn [] (.complete done nil))
+            .onError (fn [e] (.complete done nil)))
+          (await (.-future done)))
+        (catch Object _ nil))
+      ;; A dropped connection always retries; `error` is reached only once
+      ;; max-attempts CONSECUTIVE attempts have failed, so any connection
+      ;; that got as far as :connected resets the count back to 0.
+      (let [base-attempt (if @connected? 0 attempt)
+            next-attempt (inc base-attempt)]
         (if (>= next-attempt max-attempts)
           (on-sse-state :error)
           (do
-            (await (Future/delayed (Duration .milliseconds (.round (backoff-ms attempt)))))
-            (recur next-attempt false)))))))
+            (await (Future/delayed (Duration .milliseconds (.round (backoff-ms base-attempt)))))
+            (recur next-attempt)))))))
