@@ -1,0 +1,54 @@
+(ns em-frontend.dev
+  "REPL-driven dev entry point. Not required by em-frontend.main -- pass it
+   as an extra compile root so it's loaded into the running app alongside
+   main (see `bb repl`, which runs
+   `clojure -M:cljd flutter em-frontend.main em-frontend.dev`).
+
+   Workflow, once connected to the socket REPL printed on startup:
+     (in-ns 'em-frontend.dev)
+     (pick!)                ; arms the widget picker in the running app
+     ;; click any widget on screen
+     (current-store)        ; => the live domain store at that widget
+     (current-ui)            ; => the live transient ui map
+     (swap! (store-atom) ...) ; poke live state directly
+     (mount! (m/Text \"hi\")) ; swap in a replacement widget; (mount! nil) reverts
+     (ancestors)             ; debugGetDiagnosticChain from the picked widget
+
+   `*env` (cljd.core, auto-referred) holds the full lexical scope at the
+   picked call site -- since every helper in em-frontend.app takes
+   store-atom/ui-atom as explicit params, `:store-atom`/`:ui-atom` are in
+   `*env` no matter which widget you pick."
+  (:require [cljd.flutter.repl :as repl]
+            [em-frontend.app :as app]
+            [em-frontend.canvas :as canvas]
+            [em-frontend.config :as config]
+            [em-frontend.edges :as edges]
+            [em-frontend.interaction :as interaction]
+            [em-frontend.invariants :as invariants]
+            [em-frontend.layout :as layout]
+            [em-frontend.model :as model]
+            [em-frontend.store :as store]
+            [em-frontend.stream :as stream]
+            [em-frontend.panels.connection-details :as p.connection-details]
+            [em-frontend.panels.element-details :as p.element-details]
+            [em-frontend.panels.field-flow-trace :as p.field-flow-trace]
+            [em-frontend.panels.incomplete-tooltip :as p.incomplete-tooltip]
+            [em-frontend.panels.specification-expanded :as p.specification-expanded]
+            [em-frontend.panels.timeline-filter :as p.timeline-filter]))
+
+(def pick! repl/pick!)
+(def mount! repl/mount!)
+(def ancestors repl/ancestors)
+
+(defn store-atom
+  "The running app's live store atom, from the last-picked widget's scope."
+  []
+  (:store-atom *env))
+
+(defn ui-atom
+  "The running app's live (transient) ui atom, from the last-picked widget's scope."
+  []
+  (:ui-atom *env))
+
+(defn current-store [] (some-> (store-atom) deref))
+(defn current-ui [] (some-> (ui-atom) deref))

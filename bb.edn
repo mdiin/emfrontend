@@ -1,0 +1,33 @@
+{:tasks
+ {clean {:doc "Clean ClojureDart compile output"
+         :task (shell "clojure -M:cljd clean")}
+
+  compile {:doc "Compile ClojureDart (production, no test sources)"
+           :task (shell "clojure -M:cljd compile")}
+
+  test {:doc "Run ClojureDart/dart tests, then clean+recompile to drop stray test imports from cljd-out (see AGENTS.md gotcha)"
+        :task (do (shell "clojure -M:cljd:test test")
+                  (shell "clojure -M:cljd clean")
+                  (shell "clojure -M:cljd compile"))}
+
+  analyze {:doc "flutter analyze (run compile first if cljd-out is stale)"
+           :task (shell "flutter analyze")}
+
+  app {:doc "Run the app on this desktop's native platform (Linux)"
+       :depends [compile]
+       :task (shell "flutter run -d linux")}
+
+  dev {:doc "Run with hot reload + a ClojureDart socket REPL for REPL-driven dev (see src/em_frontend/dev.cljd)"
+       :task (shell "clojure -M:cljd flutter em-frontend.main em-frontend.dev")}
+
+  app-macos {:doc "Run the app on macOS"
+             :depends [compile]
+             :task (shell "flutter run -d macos")}
+
+  build-linux {:doc "Build release bundle for Linux"
+               :depends [compile]
+               :task (shell "flutter build linux --release")}
+
+  build-macos {:doc "Build release bundle for macOS"
+               :depends [compile]
+               :task (shell "flutter build macos --release")}}}
