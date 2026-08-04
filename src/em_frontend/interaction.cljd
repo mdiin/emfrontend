@@ -126,6 +126,9 @@
 
 (defn clear-field-flow-trace
   "The FieldFlowTrace surface's only other provided action; no separate
-   named rule covers it beyond resetting the trace FieldFlowHighlights set."
+   named rule covers it beyond resetting the trace FieldFlowHighlights set.
+   Emits :field-flow-trace-cleared so the Flutter layer can reset the
+   transient connection-visual map (the highlighted/dimmed edge styling)."
   [store]
-  {:store (assoc-in store [:visualization :highlighted_path] #{}) :effects []})
+  {:store (assoc-in store [:visualization :highlighted_path] #{})
+   :effects [{:type :field-flow-trace-cleared}]})

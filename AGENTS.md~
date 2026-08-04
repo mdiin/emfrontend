@@ -1,0 +1,19 @@
+# em-frontend
+
+A visualisation of the Event Model produced by the emcli.
+
+## Tech stack
+
+- Javascript
+- Pixi.js for rendering
+- Custom-built grid-layout calculator (no library)
+- Custom-built edge-routing algorithm (no library)
+- Static build served by a small launcher (`scripts/launch.mjs`) that opens the
+  user's own browser (chromium `--app=` mode, falling back to `xdg-open`) —
+  no embedded webview. Packaged for distribution via babashka/bbin.
+
+## Guidelines
+- Use an idiomatic functional style
+
+## End goal
+- Package as a single binary

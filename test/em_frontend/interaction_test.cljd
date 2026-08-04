@@ -141,5 +141,6 @@
 
 (deftest clear-field-flow-trace-test
   (let [store (assoc-in (base-store) [:visualization :highlighted_path] #{:e1 :e2})
-        {:keys [store]} (interaction/clear-field-flow-trace store)]
-    (is (= #{} (get-in store [:visualization :highlighted_path])))))
+        {:keys [store effects]} (interaction/clear-field-flow-trace store)]
+    (is (= #{} (get-in store [:visualization :highlighted_path])))
+    (is (some #(= :field-flow-trace-cleared (:type %)) effects))))

@@ -19,12 +19,14 @@
             ["dart:math" :as math]
             [cljd.flutter :as f]
             [em-frontend.config :as config]
+            [em-frontend.model :as model]
             [em-frontend.store :as store]
             [em-frontend.stream :as stream]
             [em-frontend.interaction :as interaction]
             [em-frontend.canvas :as canvas]
             [em-frontend.panels.element-details :as p.element-details]
             [em-frontend.panels.connection-details :as p.connection-details]
+            [em-frontend.panels.incomplete-tooltip :as p.incomplete-tooltip]
             [em-frontend.panels.specification-expanded :as p.specification-expanded]
             [em-frontend.panels.timeline-filter :as p.timeline-filter]
             [em-frontend.panels.field-flow-trace :as p.field-flow-trace]))
@@ -48,6 +50,7 @@
     (case (:type fx)
       :connection-highlighted (swap! ui-atom assoc-in [:connection-visual (:connection fx)] :highlighted)
       :connection-dimmed (swap! ui-atom assoc-in [:connection-visual (:connection fx)] :dimmed)
+      :field-flow-trace-cleared (swap! ui-atom assoc :connection-visual {})
       :invalid-data-indicator-shown (swap! ui-atom assoc :invalid-data (:delta fx))
       nil)))
 
@@ -78,7 +81,15 @@
                              (conj s (canvas/hit-test-slice-header layout pt)))))))
         nil)
       .child
-      (m/CustomPaint .size (m/Size (:width size) (:height size)) .painter painter))))
+      (m/MouseRegion
+        .onHover
+        (fn [^g/PointerHoverEvent e]
+          (let [eid (canvas/hit-test-placement (:layout render-model) (.-localPosition e))]
+            (swap! ui-atom assoc :hovered-element eid))
+          nil)
+        .onExit (fn [_] (swap! ui-atom assoc :hovered-element nil) nil)
+        .child
+        (m/CustomPaint .size (m/Size (:width size) (:height size)) .painter painter)))))
 
 (defn- clamp [v lo hi] (max lo (min hi v)))
 
@@ -226,8 +237,16 @@
               :on-clear
               (fn [] (apply-outcome! store-atom ui-atom (interaction/clear-field-flow-trace @store-atom)))})))
 
+       (let [hovered-element (get-in st [:elements (:hovered-element ui)])]
+         (when (false? (:is_information_complete hovered-element))
+           (m/Align .alignment m/Alignment.bottomRight
+             .child
+             (p.incomplete-tooltip/incomplete-tooltip
+               (model/unsourced-fields hovered-element
+                                       (store/incoming-connections st (:id hovered-element)))))))
+
        (when-some [eid (:selected-element ui)]
-         (m/Align .alignment m/Alignment.centerRight
+          (m/Align .alignment m/Alignment.centerRight
            .child
            (p.element-details/element-details-panel
              {:element (get-in st [:elements eid])
@@ -248,7 +267,10 @@
          (m/Align .alignment m/Alignment.bottomCenter
            .child
            (p.specification-expanded/specification-expanded-panel
-             {:specifications (filterv #(= (:slice %) sid) (vals (:specifications st)))
+             {:specifications
+              (let [steps-by-spec (group-by :spec (vals (:spec-steps st)))]
+                (mapv #(assoc % :steps (get steps-by-spec (:id %) []))
+                      (filterv #(= (:slice %) sid) (vals (:specifications st)))))
               :expanded? true
               :element-name-fn (fn [eid] (get-in st [:elements eid :name]))
               :on-toggle (fn [] (swap! ui-atom update :expanded-slices disj sid))})))])))
@@ -288,7 +310,7 @@
   (f/widget
     :managed [store-atom (atom (store/initial-store)) :dispose nil]
     :managed [ui-atom (atom {:connection-visual {} :selected-element nil
-                             :selected-connection nil :expanded-slices #{}})
+                             :selected-connection nil :expanded-slices #{} :hovered-element nil})
               :dispose nil]
     :managed [last-scale (atom 1.0) :dispose nil]
     :managed [transform-controller (m/TransformationController)]
