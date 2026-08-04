@@ -8,11 +8,12 @@
    AGENTS.md calls for a custom-built grid-layout calculator (no library);
    this is it.")
 
-(def slice-width 220.0)
+(def slice-width 252.0)
 (def slice-header-height 56.0)
-(def swimlane-row-height 120.0)
+(def swimlane-row-height 168.0)
 (def swimlane-label-width 96.0)
-(def card-margin 8.0)
+(def card-margin-h 24.0)
+(def card-margin-v 32.0)
 
 (defn- index-of [coll x]
   (first (keep-indexed (fn [i v] (when (= v x) i)) coll)))
@@ -55,10 +56,10 @@
           {:placement-id (:id p)
            :element-id (:element p)
            :col col :row row
-           :rect {:x (+ swimlane-label-width (* col slice-width) card-margin)
-                  :y (+ slice-header-height (* row swimlane-row-height) card-margin)
-                  :width (- slice-width (* 2 card-margin))
-                  :height (- swimlane-row-height (* 2 card-margin))}})
+            :rect {:x (+ swimlane-label-width (* col slice-width) card-margin-h)
+                   :y (+ slice-header-height (* row swimlane-row-height) card-margin-v)
+                   :width (- slice-width (* 2 card-margin-h))
+                   :height (- swimlane-row-height (* 2 card-margin-v))}})
         slice-headers
         (for [[i s] (map-indexed vector ordered-slices)]
           {:slice-id (:id s) :index i

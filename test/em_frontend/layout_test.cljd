@@ -62,6 +62,27 @@
                                            :elements {:e1 {}} :swimlane-order []})]
       (is (= 0 (count (:placements result)))))))
 
+(deftest layout-card-size-and-gap-test
+  (testing "card dimensions are fixed at 204x104; gaps between cards are 3x (h) and 4x (v) the baseline 16px"
+    (let [slices [{:id :s1 :index 0} {:id :s2 :index 1}]
+          elements {:e1 {:swimlane :sw1} :e2 {:swimlane :sw2}}
+          placements [{:id :p1 :slice :s1 :element :e1}
+                      {:id :p2 :slice :s2 :element :e1}
+                      {:id :p3 :slice :s1 :element :e2}]
+          result (layout/layout-timeline {:slices slices :placements placements
+                                          :elements elements :swimlane-order [:sw1 :sw2]})
+          by-id (into {} (map (juxt :placement-id identity)) (:placements result))
+          p1 (:rect (get by-id :p1))
+          p2 (:rect (get by-id :p2))
+          p3 (:rect (get by-id :p3))]
+      ;; card size unchanged from baseline
+      (is (= 204.0 (:width p1)))
+      (is (= 104.0 (:height p1)))
+      ;; horizontal gap between adjacent cards = 3 * 16 = 48
+      (is (= 48.0 (- (:x p2) (+ (:x p1) (:width p1)))))
+      ;; vertical gap between adjacent swimlane rows = 4 * 16 = 64
+      (is (= 64.0 (- (:y p3) (+ (:y p1) (:height p1))))))))
+
 (deftest layout-timeline-size-scales-with-content-test
   (testing "table size grows with slice count and swimlane count"
     (let [one-slice (layout/layout-timeline {:slices [{:id :s1 :index 0}] :placements []
