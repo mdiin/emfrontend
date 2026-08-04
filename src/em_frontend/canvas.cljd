@@ -67,7 +67,7 @@
   "A small filled triangle pointing along (from -> to), tip at `to`."
   [^m/Canvas canvas ^double from-x ^double from-y ^double to-x ^double to-y ^m/Color color]
   (let [angle (math/atan2 (- to-y from-y) (- to-x from-x))
-        size 9.0
+        size 14.0
         spread 0.45
         wing (fn [a] (m/Offset (- to-x (* size (math/cos (+ angle a))))
                                 (- to-y (* size (math/sin (+ angle a))))))
@@ -191,19 +191,21 @@
                             :highlighted m/Colors.deepOrange
                             :dimmed m/Colors.grey.shade300
                             m/Colors.blueGrey)
-                    width (if (= visual :highlighted) 2.5 1.0)
-                    [fx fy tx ty] (edge-endpoints from-rect to-rect)
-                    fx (+ fx x-nudge) tx (+ tx x-nudge)
-                    dy (abs (- ty fy))
-                    tension (max 40.0 (min 200.0 (* dy 0.5)))
-                    descending? (<= fy ty)
-                    cp1y (if descending? (+ fy tension) (- fy tension))
-                    cp2y (if descending? (- ty tension) (+ ty tension))
-                    path (doto (m/Path)
-                           (.moveTo fx fy)
-                           (.cubicTo fx cp1y tx cp2y tx ty))]]
+                    width (if (= visual :highlighted) 4.0 2.0)
+                     [fx fy tx ty] (edge-endpoints from-rect to-rect)
+                     fx (+ fx x-nudge) tx (+ tx x-nudge)
+                     dy (abs (- ty fy))
+                     tension (max 40.0 (min 200.0 (* dy 0.5)))
+                     descending? (<= fy ty)
+                     arrowhead-size 14.0
+                     curve-ty (if descending? (- ty arrowhead-size) (+ ty arrowhead-size))
+                     cp1y (if descending? (+ fy tension) (- fy tension))
+                     cp2y (if descending? (- curve-ty tension) (+ curve-ty tension))
+                     path (doto (m/Path)
+                            (.moveTo fx fy)
+                            (.cubicTo fx cp1y tx cp2y tx curve-ty))]]
         (.drawPath canvas path (stroke-paint color width))
-        (draw-arrowhead canvas fx cp2y tx ty color))
+        (draw-arrowhead canvas tx cp2y tx ty color))
       (doseq [{:keys [element-id rect]} (:placements layout)
               :let [element (get elements element-id)
                     alpha   (get element-alphas element-id 1.0)]]
