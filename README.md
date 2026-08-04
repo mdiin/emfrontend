@@ -21,3 +21,9 @@ sudo apt-get install clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev
 ```
 bb app
 ```
+
+If the build fails with a linker error mentioning a stale compiler path (e.g. from a Guix profile), delete the cached CMake build and retry:
+
+```
+rm -rf build/linux && bb app
+```
