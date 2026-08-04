@@ -1,17 +1,23 @@
 # em_frontend
 
-A new Flutter project.
+A visualisation of the Event Model produced by the emcli.
 
-## Getting Started
+## Prerequisites
 
-This project is a starting point for a Flutter application.
+### Fedora
 
-A few resources to get you started if this is your first Flutter project:
+```
+sudo dnf install clang cmake ninja-build pkgconf gtk3-devel xz-devel libstdc++-devel
+```
 
-- [Learn Flutter](https://docs.flutter.dev/get-started/learn-flutter)
-- [Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Flutter learning resources](https://docs.flutter.dev/reference/learning-resources)
+### Ubuntu/Debian
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+```
+sudo apt-get install clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev libstdc++-12-dev
+```
+
+## Running
+
+```
+bb app
+```
