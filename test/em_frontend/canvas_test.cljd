@@ -85,3 +85,25 @@
       ;; edges 0 and 2 share group (0,1); edge 1 is alone in group (1,2)
       (is (= #{-6.0 6.0} (into #{} (map result [0 2]))))
       (is (= 0.0 (get result 1))))))
+
+;; == timeline-title-font-size / timeline-title-height ========================
+
+(deftest title-font-size-at-default-zoom-test
+  (testing "at zoom 1.0 returns the base font size"
+    (is (= canvas/timeline-title-base-font-size
+           (canvas/timeline-title-font-size 1.0)))))
+
+(deftest title-font-size-grows-when-zoomed-out-test
+  (testing "zooming out doubles the font size at zoom 0.5"
+    (is (= (* 2.0 canvas/timeline-title-base-font-size)
+           (canvas/timeline-title-font-size 0.5)))))
+
+(deftest title-font-size-shrinks-when-zoomed-in-test
+  (testing "zooming in halves the font size at zoom 2.0"
+    (is (= (* 0.5 canvas/timeline-title-base-font-size)
+           (canvas/timeline-title-font-size 2.0)))))
+
+(deftest title-height-grows-with-zoom-out-test
+  (testing "title height at zoom 0.5 is larger than at zoom 1.0"
+    (is (> (canvas/timeline-title-height 0.5)
+           (canvas/timeline-title-height 1.0)))))

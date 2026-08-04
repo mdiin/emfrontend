@@ -38,6 +38,21 @@
 
 (def ^:private arrowhead-size 14.0)
 
+(def timeline-title-base-font-size 48.0)
+(def ^:private timeline-title-padding 24.0)
+
+(defn timeline-title-font-size
+  "Font size for the timeline title, scaled inversely with zoom so the title
+   stays visually large as the user zooms out for an overview."
+  ^double [^double zoom]
+  (/ timeline-title-base-font-size zoom))
+
+(defn timeline-title-height
+  "Pixel height of the title strip above a timeline table. Grows as the user
+   zooms out so the spacing between timelines tracks the title size."
+  ^double [^double zoom]
+  (+ (timeline-title-font-size zoom) timeline-title-padding))
+
 ;; == Low-level drawing helpers ================================================
 
 (defn- ^m/Paint fill-paint [^m/Color color]
@@ -165,60 +180,79 @@
   "render-model: as returned by build-timeline-render-model, plus
    connection-visual, a {connection-id -> :highlighted|:dimmed} map (see
    em-frontend.interaction/select-field-for-trace; absent means :normal),
-   and element-alphas, a {element-id -> double} map for in-flight fade
+   element-alphas, a {element-id -> double} map for in-flight fade
    animations (absent or 1.0 means fully opaque; saveLayer is used for any
-   card whose alpha is not 1.0)."
+   card whose alpha is not 1.0), title, the timeline's display name, and
+   zoom, the current viewport zoom (used to size the title inversely so it
+   grows as the user zooms out for an overview)."
   ^m/CustomPainter
-  [{:keys [layout slices swimlanes elements edges connection-visual element-alphas]}]
-  (reify :extends m/CustomPainter
-    (paint [this ^m/Canvas canvas ^m/Size size]
-      (doseq [{:keys [rect swimlane-id]} (:swimlane-bands layout)]
-        (.drawRect canvas (rect->m rect) (fill-paint m/Colors.grey.shade50))
-        (when-some [sw (get swimlanes swimlane-id)]
-          (draw-text canvas (or (:name sw) "") 4.0 (+ (:y rect) 8.0)
-                     (m/TextStyle .fontSize 11.0 .fontWeight m/FontWeight.w500 .color m/Colors.black)
-                     (- layout/swimlane-label-width 8.0))))
-      (doseq [{:keys [slice-id rect]} (:slice-headers layout)
-              :let [slice (get slices slice-id)]]
-        (.drawRect canvas (rect->m rect)
-                   (fill-paint (get slice-status-fill (:status slice) m/Colors.grey.shade100)))
-        (.drawRect canvas (rect->m (assoc rect :y (- (+ (:y rect) (:height rect)) 3.0) :height 3.0))
-                   (fill-paint (get slice-status-border (:status slice) m/Colors.grey.shade600)))
-        (draw-text canvas (or (:title slice) "") (+ (:x rect) 8.0) (+ (:y rect) 8.0)
-                   (m/TextStyle .fontWeight m/FontWeight.bold .fontSize 13.0 .color m/Colors.black)
-                   (- (:width rect) 16.0)))
-      (doseq [{:keys [connection-id from-rect to-rect x-nudge]} edges
-              :let [visual (get connection-visual connection-id :normal)
-                    color (case visual
-                            :highlighted m/Colors.deepOrange
-                            :dimmed m/Colors.grey.shade300
-                            m/Colors.blueGrey)
-                    width (if (= visual :highlighted) 4.0 2.0)
-                     [fx fy tx ty] (edge-endpoints from-rect to-rect)
-                     fx (+ fx x-nudge) tx (+ tx x-nudge)
-                     dy (abs (- ty fy))
-                     tension (max 40.0 (min 200.0 (* dy 0.5)))
-                     descending? (<= fy ty)
-                     curve-ty (if descending? (- ty arrowhead-size) (+ ty arrowhead-size))
-                     cp1y (if descending? (+ fy tension) (- fy tension))
-                     cp2y (if descending? (- curve-ty tension) (+ curve-ty tension))
-                     path (doto (m/Path)
-                            (.moveTo fx fy)
-                            (.cubicTo fx cp1y tx cp2y tx curve-ty))]]
-        (.drawPath canvas path (stroke-paint color width))
-        (draw-arrowhead canvas tx cp2y tx ty color))
-      (doseq [{:keys [element-id rect]} (:placements layout)
-              :let [element (get elements element-id)
-                    alpha   (get element-alphas element-id 1.0)]]
-        (if (< alpha 1.0)
-          (let [opacity-paint (doto (m/Paint)
-                                (.-color! (m/Color.fromARGB (int (* 255.0 alpha)) 255 255 255)))]
-            (.saveLayer canvas (rect->m rect) opacity-paint)
-            (draw-element-card canvas rect element)
-            (.restore canvas))
-          (draw-element-card canvas rect element)))
-      nil)
-    (shouldRepaint [this _] true)))
+  [{:keys [layout slices swimlanes elements edges connection-visual element-alphas title zoom]}]
+  (let [zoom    (double (or zoom 1.0))
+        title-h (timeline-title-height zoom)
+        font-sz (timeline-title-font-size zoom)]
+    (reify :extends m/CustomPainter
+      (paint [this ^m/Canvas canvas ^m/Size size]
+        (let [title-style (m/TextStyle .fontWeight m/FontWeight.bold .fontSize font-sz
+                                        .color m/Colors.black87)
+              tp (doto (m/TextPainter
+                         .text (m/TextSpan .text (or title "") .style title-style)
+                         .textDirection m/TextDirection.ltr
+                         .ellipsis "…"
+                         .maxLines 1)
+                   (.layout .maxWidth (.-width size)))
+              title-x (/ (- (.-width size) (.-width tp)) 2.0)
+              title-y (/ (- title-h font-sz) 2.0)]
+          (.paint tp canvas (m/Offset title-x title-y)))
+        (.save canvas)
+        (.translate canvas 0.0 title-h)
+        (doseq [{:keys [rect swimlane-id]} (:swimlane-bands layout)]
+          (.drawRect canvas (rect->m rect) (fill-paint m/Colors.grey.shade50))
+          (when-some [sw (get swimlanes swimlane-id)]
+            (draw-text canvas (or (:name sw) "") 4.0 (+ (:y rect) 8.0)
+                       (m/TextStyle .fontSize 11.0 .fontWeight m/FontWeight.w500 .color m/Colors.black)
+                       (- layout/swimlane-label-width 8.0))))
+        (doseq [{:keys [slice-id rect]} (:slice-headers layout)
+                :let [slice (get slices slice-id)]]
+          (.drawRect canvas (rect->m rect)
+                     (fill-paint (get slice-status-fill (:status slice) m/Colors.grey.shade100)))
+          (.drawRect canvas (rect->m (assoc rect :y (- (+ (:y rect) (:height rect)) 3.0) :height 3.0))
+                     (fill-paint (get slice-status-border (:status slice) m/Colors.grey.shade600)))
+          (draw-text canvas (or (:title slice) "") (+ (:x rect) 8.0) (+ (:y rect) 8.0)
+                     (m/TextStyle .fontWeight m/FontWeight.bold .fontSize 13.0 .color m/Colors.black)
+                     (- (:width rect) 16.0)))
+        (doseq [{:keys [connection-id from-rect to-rect x-nudge]} edges
+                :let [visual (get connection-visual connection-id :normal)
+                      color (case visual
+                              :highlighted m/Colors.deepOrange
+                              :dimmed m/Colors.grey.shade300
+                              m/Colors.blueGrey)
+                      width (if (= visual :highlighted) 4.0 2.0)
+                       [fx fy tx ty] (edge-endpoints from-rect to-rect)
+                       fx (+ fx x-nudge) tx (+ tx x-nudge)
+                       dy (abs (- ty fy))
+                       tension (max 40.0 (min 200.0 (* dy 0.5)))
+                       descending? (<= fy ty)
+                       curve-ty (if descending? (- ty arrowhead-size) (+ ty arrowhead-size))
+                       cp1y (if descending? (+ fy tension) (- fy tension))
+                       cp2y (if descending? (- curve-ty tension) (+ curve-ty tension))
+                       path (doto (m/Path)
+                              (.moveTo fx fy)
+                              (.cubicTo fx cp1y tx cp2y tx curve-ty))]]
+          (.drawPath canvas path (stroke-paint color width))
+          (draw-arrowhead canvas tx cp2y tx ty color))
+        (doseq [{:keys [element-id rect]} (:placements layout)
+                :let [element (get elements element-id)
+                      alpha   (get element-alphas element-id 1.0)]]
+          (if (< alpha 1.0)
+            (let [opacity-paint (doto (m/Paint)
+                                  (.-color! (m/Color.fromARGB (int (* 255.0 alpha)) 255 255 255)))]
+              (.saveLayer canvas (rect->m rect) opacity-paint)
+              (draw-element-card canvas rect element)
+              (.restore canvas))
+            (draw-element-card canvas rect element)))
+        (.restore canvas)
+        nil)
+      (shouldRepaint [this _] true))))
 
 ;; == Hit-testing (element/connection tap-to-select) ===========================
 

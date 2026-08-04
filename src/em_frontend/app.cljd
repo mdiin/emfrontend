@@ -91,15 +91,24 @@
 ;; == Canvas: per-timeline hit-testing + the whole-canvas InteractiveViewer ===
 
 (defn- timeline-widget [st ui store-atom ui-atom timeline-id]
-  (let [render-model (canvas/build-timeline-render-model st timeline-id)
-        painter (canvas/timeline-painter (assoc render-model
-                                                 :connection-visual (:connection-visual ui)
-                                                 :element-alphas (:element-current-alphas ui)))
-        size (get-in render-model [:layout :size])]
+  (let [zoom         (double (get-in st [:visualization :zoom] 1.0))
+        title        (get-in st [:timelines timeline-id :title])
+        render-model (canvas/build-timeline-render-model st timeline-id)
+        painter      (canvas/timeline-painter (assoc render-model
+                                                     :connection-visual (:connection-visual ui)
+                                                     :element-alphas (:element-current-alphas ui)
+                                                     :title title
+                                                     :zoom zoom))
+        layout-size  (get-in render-model [:layout :size])
+        title-h      (canvas/timeline-title-height zoom)
+        total-size   {:width (:width layout-size) :height (+ (:height layout-size) title-h)}
+        ;; hit-test coordinates are widget-local; the table is translated down
+        ;; by title-h inside the painter, so adjust the tap/hover y accordingly.
+        adjust-pt    (fn [^m/Offset pt] (m/Offset (.-dx pt) (- (.-dy pt) title-h)))]
     (m/GestureDetector
       .onTapUp
       (fn [^m/TapUpDetails details]
-        (let [pt (.-localPosition details)
+        (let [pt     (adjust-pt (.-localPosition details))
               layout (:layout render-model)]
           (cond
             (some? (canvas/hit-test-placement layout pt))
@@ -120,12 +129,12 @@
       (m/MouseRegion
         .onHover
         (fn [^g/PointerHoverEvent e]
-          (let [eid (canvas/hit-test-placement (:layout render-model) (.-localPosition e))]
+          (let [eid (canvas/hit-test-placement (:layout render-model) (adjust-pt (.-localPosition e)))]
             (swap! ui-atom assoc :hovered-element eid))
           nil)
         .onExit (fn [_] (swap! ui-atom assoc :hovered-element nil) nil)
         .child
-        (m/CustomPaint .size (m/Size (:width size) (:height size)) .painter painter)))))
+        (m/CustomPaint .size (m/Size (:width total-size) (:height total-size)) .painter painter)))))
 
 (defn- clamp [v lo hi] (max lo (min hi v)))
 
@@ -151,12 +160,14 @@
    content-width/height (rule ViewportSnapsToContent's content_fit_zoom/
    content_center_pan_x/content_center_pan_y)."
   [st]
-  (reduce
-    (fn [{:keys [width height]} timeline-id]
-      (let [size (get-in (canvas/build-timeline-render-model st timeline-id) [:layout :size])]
-        {:width (max width (:width size)) :height (+ height (:height size))}))
-    {:width 0.0 :height 0.0}
-    (keys (:timelines st))))
+  (let [zoom (double (get-in st [:visualization :zoom] 1.0))]
+    (reduce
+      (fn [{:keys [width height]} timeline-id]
+        (let [size (get-in (canvas/build-timeline-render-model st timeline-id) [:layout :size])]
+          {:width  (max width (:width size))
+           :height (+ height (:height size) (canvas/timeline-title-height zoom))}))
+      {:width 0.0 :height 0.0}
+      (keys (:timelines st)))))
 
 (defn- snap-to-content!
   "Fits + centers the whole model in the viewport (rule
