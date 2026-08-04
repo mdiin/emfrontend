@@ -36,6 +36,8 @@
    :screen m/Colors.purple
    :automation m/Colors.blueGrey})
 
+(def ^:private arrowhead-size 14.0)
+
 ;; == Low-level drawing helpers ================================================
 
 (defn- ^m/Paint fill-paint [^m/Color color]
@@ -67,7 +69,7 @@
   "A small filled triangle pointing along (from -> to), tip at `to`."
   [^m/Canvas canvas ^double from-x ^double from-y ^double to-x ^double to-y ^m/Color color]
   (let [angle (math/atan2 (- to-y from-y) (- to-x from-x))
-        size 14.0
+        size arrowhead-size
         spread 0.45
         wing (fn [a] (m/Offset (- to-x (* size (math/cos (+ angle a))))
                                 (- to-y (* size (math/sin (+ angle a))))))
@@ -197,7 +199,6 @@
                      dy (abs (- ty fy))
                      tension (max 40.0 (min 200.0 (* dy 0.5)))
                      descending? (<= fy ty)
-                     arrowhead-size 14.0
                      curve-ty (if descending? (- ty arrowhead-size) (+ ty arrowhead-size))
                      cp1y (if descending? (+ fy tension) (- fy tension))
                      cp2y (if descending? (- curve-ty tension) (+ curve-ty tension))
