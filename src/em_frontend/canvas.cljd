@@ -151,12 +151,12 @@
     (.drawRRect canvas rrect (stroke-paint (if incomplete m/Colors.amber kind-color)
                                             (if incomplete 2.5 1.5)))
     (draw-text canvas (or (:name element) "") (+ (:x rect) 8.0) (+ (:y rect) 8.0)
-               (m/TextStyle .fontWeight m/FontWeight.w600 .fontSize 12.0)
+               (m/TextStyle .fontWeight m/FontWeight.bold .fontSize 13.0 .color m/Colors.black)
                (- (:width rect) 16.0))
     (doseq [[i field] (map-indexed vector (take 4 (model/canvas-fields element)))]
-      (draw-text canvas (str (:name field) ": " (name (:type field)))
+      (draw-text canvas (str (:name field) ": " (name (or (:type field) "")))
                  (+ (:x rect) 8.0) (+ (:y rect) 28.0 (* i 16.0))
-                 (m/TextStyle .fontSize 10.0 .color m/Colors.grey.shade700)
+                 (m/TextStyle .fontSize 11.0 .color m/Colors.grey.shade700)
                  (- (:width rect) 16.0)))))
 
 (defn timeline-painter
@@ -174,7 +174,7 @@
         (.drawRect canvas (rect->m rect) (fill-paint m/Colors.grey.shade50))
         (when-some [sw (get swimlanes swimlane-id)]
           (draw-text canvas (or (:name sw) "") 4.0 (+ (:y rect) 8.0)
-                     (m/TextStyle .fontSize 11.0 .fontWeight m/FontWeight.w500)
+                     (m/TextStyle .fontSize 11.0 .fontWeight m/FontWeight.w500 .color m/Colors.black)
                      (- layout/swimlane-label-width 8.0))))
       (doseq [{:keys [slice-id rect]} (:slice-headers layout)
               :let [slice (get slices slice-id)]]
@@ -183,7 +183,7 @@
         (.drawRect canvas (rect->m (assoc rect :y (- (+ (:y rect) (:height rect)) 3.0) :height 3.0))
                    (fill-paint (get slice-status-border (:status slice) m/Colors.grey.shade600)))
         (draw-text canvas (or (:title slice) "") (+ (:x rect) 8.0) (+ (:y rect) 8.0)
-                   (m/TextStyle .fontWeight m/FontWeight.bold .fontSize 13.0)
+                   (m/TextStyle .fontWeight m/FontWeight.bold .fontSize 13.0 .color m/Colors.black)
                    (- (:width rect) 16.0)))
       (doseq [{:keys [connection-id from-rect to-rect x-nudge]} edges
               :let [visual (get connection-visual connection-id :normal)
