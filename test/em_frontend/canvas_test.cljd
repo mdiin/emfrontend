@@ -1,0 +1,87 @@
+(ns em-frontend.canvas-test
+  "Tests for pure geometry helpers in em-frontend.canvas: swimlane-aware
+   vertical anchor selection (edge-endpoints) and per-bundle x-nudge
+   assignment (build-timeline-render-model stagger logic, exercised here
+   directly from the underlying grouping math)."
+  (:require [cljd.test :refer [deftest is testing]]
+            [em-frontend.canvas :as canvas]))
+
+;; == edge-endpoints ==========================================================
+
+;; Rect helpers: layout places cards at y = slice-header-height + row * swimlane-row-height + card-margin
+;; (56 + row*120 + 8 = 64 + row*120). Width/height are fixed (204 x 104).
+(defn- rect [col row]
+  {:x (+ 96.0 (* col 220.0) 8.0)
+   :y (+ 56.0 (* row 120.0) 8.0)
+   :width 204.0 :height 104.0})
+
+(deftest descending-anchors-test
+  (testing "from above to below: exit bottom-mid of from, enter top-mid of to"
+    (let [fr (rect 0 0) tr (rect 1 1)
+          [fx fy tx ty] (canvas/edge-endpoints fr tr)]
+      (is (= fx (+ (:x fr) (/ (:width fr) 2.0))))
+      (is (= fy (+ (:y fr) (:height fr))))   ; bottom of from
+      (is (= tx (+ (:x tr) (/ (:width tr) 2.0))))
+      (is (= ty (:y tr))))))                 ; top of to
+
+(deftest ascending-anchors-test
+  (testing "from below to above: exit top-mid of from, enter bottom-mid of to"
+    (let [fr (rect 0 1) tr (rect 1 0)
+          [fx fy tx ty] (canvas/edge-endpoints fr tr)]
+      (is (= fx (+ (:x fr) (/ (:width fr) 2.0))))
+      (is (= fy (:y fr)))                              ; top of from
+      (is (= tx (+ (:x tr) (/ (:width tr) 2.0))))
+      (is (= ty (+ (:y tr) (:height tr)))))))          ; bottom of to
+
+(deftest same-row-treated-as-descending-test
+  (testing "same swimlane row (y equal): exit bottom-mid, enter top-mid"
+    (let [fr (rect 0 0) tr (rect 1 0)
+          [fx fy tx ty] (canvas/edge-endpoints fr tr)]
+      (is (= fy (+ (:y fr) (:height fr))))   ; bottom of from
+      (is (= ty (:y tr))))))                 ; top of to
+
+(deftest same-column-same-row-test
+  (testing "same column, same row (degenerate): bottom-mid to top-mid"
+    (let [fr (rect 0 0) tr (rect 0 0)
+          [fx fy tx ty] (canvas/edge-endpoints fr tr)]
+      (is (= fy (+ (:y fr) (:height fr))))
+      (is (= ty (:y tr))))))
+
+;; == x-nudge grouping ========================================================
+;;
+;; The nudge logic lives inside build-timeline-render-model, so we test it by
+;; replicating the grouping formula and verifying the offsets it produces.
+
+(defn- nudges-for [from-to-col-pairs]
+  (let [lane-spacing 12.0
+        raw (map-indexed (fn [i [fc tc]] {:from-col fc :to-col tc :i i}) from-to-col-pairs)
+        groups (group-by (juxt :from-col :to-col) raw)]
+    (into {}
+          (mapcat (fn [group]
+                    (let [n (count group)]
+                      (map-indexed (fn [gi edge]
+                                     [(:i edge) (* (- gi (/ (dec n) 2.0)) lane-spacing)])
+                                   group)))
+                  (vals groups)))))
+
+(deftest single-edge-no-nudge-test
+  (testing "a lone edge in its group gets nudge 0.0"
+    (let [result (nudges-for [[0 1]])]
+      (is (= 0.0 (get result 0))))))
+
+(deftest two-edges-same-pair-test
+  (testing "two edges sharing (from-col, to-col) are offset by ±lane-spacing/2"
+    (let [result (nudges-for [[0 1] [0 1]])]
+      (is (= #{-6.0 6.0} (into #{} (vals result)))))))
+
+(deftest three-edges-same-pair-test
+  (testing "three edges in the same group get offsets -12, 0, +12"
+    (let [result (nudges-for [[0 1] [0 1] [0 1]])]
+      (is (= #{-12.0 0.0 12.0} (into #{} (vals result)))))))
+
+(deftest different-pairs-independent-nudge-test
+  (testing "edges in different (from-col, to-col) groups are each nudged independently"
+    (let [result (nudges-for [[0 1] [1 2] [0 1]])]
+      ;; edges 0 and 2 share group (0,1); edge 1 is alone in group (1,2)
+      (is (= #{-6.0 6.0} (into #{} (map result [0 2]))))
+      (is (= 0.0 (get result 1))))))

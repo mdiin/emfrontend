@@ -51,22 +51,17 @@
   (m/Rect.fromLTWH x y width height))
 
 (defn edge-endpoints
-  "The (x1 y1 x2 y2) anchor points an edge between two placement rects draws
-   between. Same-column pairs (a slice's own command->event, stacked across
-   swimlane rows) connect vertically, top rect's bottom-mid to bottom rect's
-   top-mid -- routing them right-edge-to-left-edge like a cross-column edge
-   would draw a near-vertical diagonal cutting across the whole card width.
-   Everything else follows ConnectionsRenderRightToLeft: from's right-mid to
-   to's left-mid."
+  "The (fx fy tx ty) anchor points an edge draws between. Anchors are always
+   on the vertical mid-axis of each card: bottom-mid when the edge descends
+   (from-rect above or level with to-rect in swimlane order), top-mid when it
+   ascends. Direction is read from rect :y, which layout encodes as swimlane
+   row position."
   [from-rect to-rect]
-  (if (< (abs (- (:x from-rect) (:x to-rect))) 1.0)
-    (if (< (:y from-rect) (:y to-rect))
-      [(+ (:x from-rect) (/ (:width from-rect) 2)) (+ (:y from-rect) (:height from-rect))
-       (+ (:x to-rect) (/ (:width to-rect) 2)) (:y to-rect)]
-      [(+ (:x from-rect) (/ (:width from-rect) 2)) (:y from-rect)
-       (+ (:x to-rect) (/ (:width to-rect) 2)) (+ (:y to-rect) (:height to-rect))])
-    [(+ (:x from-rect) (:width from-rect)) (+ (:y from-rect) (/ (:height from-rect) 2))
-     (:x to-rect) (+ (:y to-rect) (/ (:height to-rect) 2))]))
+  (let [fx (+ (:x from-rect) (/ (:width from-rect) 2.0))
+        tx (+ (:x to-rect)   (/ (:width to-rect)   2.0))]
+    (if (<= (:y from-rect) (:y to-rect))
+      [fx (+ (:y from-rect) (:height from-rect)) tx (:y to-rect)]
+      [fx (:y from-rect) tx (+ (:y to-rect) (:height to-rect))])))
 
 (defn- draw-arrowhead
   "A small filled triangle pointing along (from -> to), tip at `to`."
@@ -114,7 +109,7 @@
         (filter (fn [c] (or (contains? placed-element-ids (:from c))
                             (contains? placed-element-ids (:to c))))
                 (vals (:connections store-val)))
-        edge-lines
+        edge-lines-raw
         (for [c candidate-connections
               :let [from-geo (map #(store/placement-geometry store-val %)
                                    (store/placements-of-element store-val (:from c)))
@@ -124,13 +119,24 @@
               :when (= timeline timeline-id)
               :let [pf (get placement-by-id from) pt (get placement-by-id to)]
               :when (and pf pt)]
-          {:connection-id (:id c) :from-rect (:rect pf) :to-rect (:rect pt)})]
+          {:connection-id (:id c) :from-rect (:rect pf) :to-rect (:rect pt)
+           :from-col (:col pf) :to-col (:col pt)})
+        lane-spacing 12.0
+        edge-lines
+        (vec (mapcat (fn [group]
+                       (let [n (count group)]
+                         (map-indexed (fn [i edge]
+                                        (-> edge
+                                            (assoc :x-nudge (* (- i (/ (dec n) 2.0)) lane-spacing))
+                                            (dissoc :from-col :to-col)))
+                                      group)))
+                     (vals (group-by (juxt :from-col :to-col) edge-lines-raw))))]
     {:layout lay
      :slices (into {} (map (fn [s] [(:id s) s])) slices)
      :swimlanes (:swimlanes store-val)
      :swimlane-order swimlane-order
      :elements (:elements store-val)
-     :edges (vec edge-lines)}))
+     :edges edge-lines}))
 
 ;; == The painter ===============================================================
 
@@ -179,16 +185,25 @@
         (draw-text canvas (or (:title slice) "") (+ (:x rect) 8.0) (+ (:y rect) 8.0)
                    (m/TextStyle .fontWeight m/FontWeight.bold .fontSize 13.0)
                    (- (:width rect) 16.0)))
-      (doseq [{:keys [connection-id from-rect to-rect]} edges
+      (doseq [{:keys [connection-id from-rect to-rect x-nudge]} edges
               :let [visual (get connection-visual connection-id :normal)
                     color (case visual
                             :highlighted m/Colors.deepOrange
                             :dimmed m/Colors.grey.shade300
                             m/Colors.blueGrey)
                     width (if (= visual :highlighted) 2.5 1.0)
-                    [fx fy tx ty] (edge-endpoints from-rect to-rect)]]
-        (.drawLine canvas (m/Offset fx fy) (m/Offset tx ty) (stroke-paint color width))
-        (draw-arrowhead canvas fx fy tx ty color))
+                    [fx fy tx ty] (edge-endpoints from-rect to-rect)
+                    fx (+ fx x-nudge) tx (+ tx x-nudge)
+                    dy (abs (- ty fy))
+                    tension (max 40.0 (min 200.0 (* dy 0.5)))
+                    descending? (<= fy ty)
+                    cp1y (if descending? (+ fy tension) (- fy tension))
+                    cp2y (if descending? (- ty tension) (+ ty tension))
+                    path (doto (m/Path)
+                           (.moveTo fx fy)
+                           (.cubicTo fx cp1y tx cp2y tx ty))]]
+        (.drawPath canvas path (stroke-paint color width))
+        (draw-arrowhead canvas fx cp2y tx ty color))
       (doseq [{:keys [element-id rect]} (:placements layout)
               :let [element (get elements element-id)
                     alpha   (get element-alphas element-id 1.0)]]
@@ -226,20 +241,35 @@
               slice-id))
           (:slice-headers layout))))
 
-(defn- point-segment-distance [px py x1 y1 x2 y2]
-  (let [dx (- x2 x1) dy (- y2 y1)
-        len2 (+ (* dx dx) (* dy dy))
-        t (if (zero? len2) 0.0 (max 0.0 (min 1.0 (/ (+ (* (- px x1) dx) (* (- py y1) dy)) len2))))
-        cx (+ x1 (* t dx)) cy (+ y1 (* t dy))]
-    (math/sqrt (+ (* (- px cx) (- px cx)) (* (- py cy) (- py cy))))))
+(defn- point-bezier-distance
+  "Minimum distance from (px, py) to the cubic Bezier with endpoints (fx, fy)
+   and (tx, ty) and vertical control points cp1y / cp2y (control x = anchor x).
+   Sampled at `steps` evenly-spaced t values."
+  [px py fx fy cp1y cp2y tx ty steps]
+  (reduce (fn [best i]
+            (let [t  (/ i (double (dec steps)))
+                  t' (- 1.0 t)
+                  bx (+ (* t' t' t' fx) (* 3.0 t' t' t fx) (* 3.0 t' t t tx) (* t t t tx))
+                  by (+ (* t' t' t' fy) (* 3.0 t' t' t cp1y) (* 3.0 t' t t cp2y) (* t t t ty))
+                  d  (math/sqrt (+ (* (- px bx) (- px bx)) (* (- py by) (- py by))))]
+              (if (< d best) d best)))
+          1.0e18
+          (range steps)))
 
 (defn hit-test-edge
-  "The connection-id of the edge line passing within `threshold` px of
+  "The connection-id of the edge curve passing within `threshold` px of
    `point`, or nil."
   [edges ^m/Offset point threshold]
   (let [x (.-dx point) y (.-dy point)]
-    (some (fn [{:keys [connection-id from-rect to-rect]}]
-            (let [[x1 y1 x2 y2] (edge-endpoints from-rect to-rect)]
-              (when (<= (point-segment-distance x y x1 y1 x2 y2) threshold)
+    (some (fn [{:keys [connection-id from-rect to-rect x-nudge]}]
+            (let [[fx fy tx ty] (edge-endpoints from-rect to-rect)
+                  fx   (+ fx x-nudge) tx (+ tx x-nudge)
+                  dy   (abs (- ty fy))
+                  tension (max 40.0 (min 200.0 (* dy 0.5)))
+                  descending? (<= fy ty)
+                  cp1y (if descending? (+ fy tension) (- fy tension))
+                  cp2y (if descending? (- ty tension) (+ ty tension))]
+              (when (<= (point-bezier-distance x y fx fy cp1y cp2y tx ty 20)
+                        threshold)
                 connection-id)))
           edges)))
