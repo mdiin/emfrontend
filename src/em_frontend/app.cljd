@@ -43,7 +43,12 @@
    one-shot effects rather than stored fields (see em-frontend.interaction's
    select-field-for-trace docstring). InvalidDataIndicatorShown is folded in
    the same way, into :invalid-data, so rule InvalidDataVisible's payload is
-   surfaced rather than silently dropped."
+   surfaced rather than silently dropped.
+
+   Animation effects (ElementAppears/ElementDisappears, TimelineAppears/
+   TimelineDisappears) seed the alpha/opacity maps in ui-atom; the shared
+   ticker (root widget) drives element alphas toward their targets each frame,
+   and AnimatedOpacity handles timeline fades implicitly."
   [store-atom ui-atom {:keys [store effects]}]
   (reset! store-atom store)
   (doseq [fx effects]
@@ -52,13 +57,44 @@
       :connection-dimmed (swap! ui-atom assoc-in [:connection-visual (:connection fx)] :dimmed)
       :field-flow-trace-cleared (swap! ui-atom assoc :connection-visual {})
       :invalid-data-indicator-shown (swap! ui-atom assoc :invalid-data (:delta fx))
+      :element-appears
+        (let [eid (:id (:element fx))]
+          (swap! ui-atom
+                 (fn [ui]
+                   (-> ui
+                       (assoc-in [:element-target-alphas eid] 1.0)
+                       (update :element-current-alphas
+                               (fn [m] (if (contains? m eid) m (assoc m eid 0.0))))))))
+      :element-disappears
+        (let [eid (:id (:element fx))]
+          (swap! ui-atom
+                 (fn [ui]
+                   (-> ui
+                       (assoc-in [:element-target-alphas eid] 0.0)
+                       (update :element-current-alphas
+                               (fn [m] (if (contains? m eid) m (assoc m eid 1.0))))))))
+      :timeline-appears
+        (swap! ui-atom assoc-in [:timeline-target-opacities (:timeline fx)] 1.0)
+      :timeline-disappears
+        (swap! ui-atom (fn [ui]
+                         (-> ui
+                             (update :fading-out-timelines conj (:timeline fx))
+                             (assoc-in [:timeline-target-opacities (:timeline fx)] 0.0))))
+      :store-seeded
+        (swap! ui-atom assoc
+               :element-target-alphas {}
+               :element-current-alphas {}
+               :fading-out-timelines #{}
+               :timeline-target-opacities {})
       nil)))
 
 ;; == Canvas: per-timeline hit-testing + the whole-canvas InteractiveViewer ===
 
 (defn- timeline-widget [st ui store-atom ui-atom timeline-id]
   (let [render-model (canvas/build-timeline-render-model st timeline-id)
-        painter (canvas/timeline-painter (assoc render-model :connection-visual (:connection-visual ui)))
+        painter (canvas/timeline-painter (assoc render-model
+                                                 :connection-visual (:connection-visual ui)
+                                                 :element-alphas (:element-current-alphas ui)))
         size (get-in render-model [:layout :size])]
     (m/GestureDetector
       .onTapUp
@@ -144,8 +180,10 @@
         (.-value! transform-controller mat)))))
 
 (defn- canvas-body [st ui store-atom ui-atom last-scale transform-controller]
-  (let [filtered (get-in st [:visualization :filtered_timeline])
-        timeline-ids (if (some? filtered) [filtered] (keys (:timelines st)))]
+  (let [filtered     (get-in st [:visualization :filtered_timeline])
+        active-ids   (if (some? filtered) [filtered] (keys (:timelines st)))
+        fading-out   (:fading-out-timelines ui)
+        timeline-ids (into (vec active-ids) fading-out)]
     (m/Listener
       .onPointerSignal
       (fn [^g/PointerSignalEvent event]
@@ -184,7 +222,17 @@
         .child
         (m/Column
           .mainAxisSize m/MainAxisSize.min
-          .children (mapv #(timeline-widget st ui store-atom ui-atom %) timeline-ids))))))
+          .children
+          (mapv (fn [tid]
+                  (m/AnimatedOpacity
+                    .key (m/ValueKey tid)
+                    .opacity (double (get (:timeline-target-opacities ui) tid 1.0))
+                    .duration (Duration .milliseconds config/animation-duration-ms)
+                    .onEnd (fn []
+                             (swap! ui-atom update :fading-out-timelines disj tid)
+                             nil)
+                    .child (timeline-widget st ui store-atom ui-atom tid)))
+                timeline-ids))))))
 
 ;; == Overlays: field-flow banner, error banner, selection panels ============
 
@@ -306,14 +354,47 @@
                        :on-clear (fn [] (apply-outcome! store-atom ui-atom (interaction/clear-timeline-filter @store-atom)))}))
                   (vals (:timelines st)))))))))
 
+(defn- step-element-alphas
+  "Called by the shared animation ticker each frame. Moves every entry in
+   :element-current-alphas one step toward its target, removing entries that
+   have arrived so the ticker listener is a no-op at steady state."
+  [ui]
+  (let [targets (:element-target-alphas ui)
+        step    (/ 16.0 config/animation-duration-ms)]
+    (if (empty? targets)
+      ui
+      (let [current' (reduce-kv
+                       (fn [m eid target]
+                         (let [cur (get m eid target)
+                               nxt (if (< cur target)
+                                     (min target (+ cur step))
+                                     (max target (- cur step)))]
+                           (assoc m eid nxt)))
+                       (:element-current-alphas ui)
+                       targets)
+            done-eids (into [] (filter #(= (get current' %) (get targets %))) (keys targets))
+            targets'  (apply dissoc targets done-eids)
+            current'' (apply dissoc current' done-eids)]
+        (assoc ui
+               :element-target-alphas targets'
+               :element-current-alphas current'')))))
+
 (defn root []
   (f/widget
     :managed [store-atom (atom (store/initial-store)) :dispose nil]
     :managed [ui-atom (atom {:connection-visual {} :selected-element nil
-                             :selected-connection nil :expanded-slices #{} :hovered-element nil})
+                             :selected-connection nil :expanded-slices #{} :hovered-element nil
+                             :element-target-alphas {} :element-current-alphas {}
+                             :fading-out-timelines #{} :timeline-target-opacities {}})
               :dispose nil]
     :managed [last-scale (atom 1.0) :dispose nil]
     :managed [transform-controller (m/TransformationController)]
+    :vsync vsync
+    :managed [anim-ticker (doto (m/AnimationController
+                                  .vsync vsync
+                                  .duration (Duration .milliseconds config/animation-duration-ms))
+                            (.addListener (fn [] (swap! ui-atom step-element-alphas)))
+                            (.repeat))]
     :managed [_ (stream/connect! stream-url
                   (fn [s] (apply-outcome! store-atom ui-atom (store/set-sse-state @store-atom s)))
                   (fn [seed] (apply-outcome! store-atom ui-atom (store/snapshot-received @store-atom seed)))

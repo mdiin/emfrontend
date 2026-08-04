@@ -9,3 +9,5 @@
 
 (def min-zoom 0.1)
 (def max-zoom 5.0)
+
+(def animation-duration-ms 250)

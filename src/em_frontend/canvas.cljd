@@ -134,12 +134,34 @@
 
 ;; == The painter ===============================================================
 
+(defn- draw-element-card
+  "Draws one element card onto `canvas` at `rect`. Factored out so the
+   alpha-fading path can wrap it in saveLayer/restore."
+  [^m/Canvas canvas rect element]
+  (let [incomplete (false? (:is_information_complete element))
+        kind-color (get element-kind-color (:kind element) m/Colors.grey)
+        rrect (m/RRect.fromRectAndRadius (rect->m rect) (m/Radius.circular 6.0))]
+    (.drawRRect canvas rrect (fill-paint m/Colors.white))
+    (.drawRRect canvas rrect (stroke-paint (if incomplete m/Colors.amber kind-color)
+                                            (if incomplete 2.5 1.5)))
+    (draw-text canvas (or (:name element) "") (+ (:x rect) 8.0) (+ (:y rect) 8.0)
+               (m/TextStyle .fontWeight m/FontWeight.w600 .fontSize 12.0)
+               (- (:width rect) 16.0))
+    (doseq [[i field] (map-indexed vector (take 4 (model/canvas-fields element)))]
+      (draw-text canvas (str (:name field) ": " (name (:type field)))
+                 (+ (:x rect) 8.0) (+ (:y rect) 28.0 (* i 16.0))
+                 (m/TextStyle .fontSize 10.0 .color m/Colors.grey.shade700)
+                 (- (:width rect) 16.0)))))
+
 (defn timeline-painter
   "render-model: as returned by build-timeline-render-model, plus
    connection-visual, a {connection-id -> :highlighted|:dimmed} map (see
-   em-frontend.interaction/select-field-for-trace; absent means :normal)."
+   em-frontend.interaction/select-field-for-trace; absent means :normal),
+   and element-alphas, a {element-id -> double} map for in-flight fade
+   animations (absent or 1.0 means fully opaque; saveLayer is used for any
+   card whose alpha is not 1.0)."
   ^m/CustomPainter
-  [{:keys [layout slices swimlanes elements edges connection-visual]}]
+  [{:keys [layout slices swimlanes elements edges connection-visual element-alphas]}]
   (reify :extends m/CustomPainter
     (paint [this ^m/Canvas canvas ^m/Size size]
       (doseq [{:keys [rect swimlane-id]} (:swimlane-bands layout)]
@@ -169,20 +191,14 @@
         (draw-arrowhead canvas fx fy tx ty color))
       (doseq [{:keys [element-id rect]} (:placements layout)
               :let [element (get elements element-id)
-                    incomplete (false? (:is_information_complete element))
-                    kind-color (get element-kind-color (:kind element) m/Colors.grey)
-                    rrect (m/RRect.fromRectAndRadius (rect->m rect) (m/Radius.circular 6.0))]]
-        (.drawRRect canvas rrect (fill-paint m/Colors.white))
-        (.drawRRect canvas rrect (stroke-paint (if incomplete m/Colors.amber kind-color)
-                                                (if incomplete 2.5 1.5)))
-        (draw-text canvas (or (:name element) "") (+ (:x rect) 8.0) (+ (:y rect) 8.0)
-                   (m/TextStyle .fontWeight m/FontWeight.w600 .fontSize 12.0)
-                   (- (:width rect) 16.0))
-        (doseq [[i field] (map-indexed vector (take 4 (model/canvas-fields element)))]
-          (draw-text canvas (str (:name field) ": " (name (:type field)))
-                     (+ (:x rect) 8.0) (+ (:y rect) 28.0 (* i 16.0))
-                     (m/TextStyle .fontSize 10.0 .color m/Colors.grey.shade700)
-                     (- (:width rect) 16.0))))
+                    alpha   (get element-alphas element-id 1.0)]]
+        (if (< alpha 1.0)
+          (let [opacity-paint (doto (m/Paint)
+                                (.-color! (m/Color.fromARGB (int (* 255.0 alpha)) 255 255 255)))]
+            (.saveLayer canvas (rect->m rect) opacity-paint)
+            (draw-element-card canvas rect element)
+            (.restore canvas))
+          (draw-element-card canvas rect element)))
       nil)
     (shouldRepaint [this _] true)))
 
