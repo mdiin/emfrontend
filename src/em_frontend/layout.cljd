@@ -37,7 +37,10 @@
    per-swimlane-row band rects, and the table's total size.
    Rows are compacted to only the swimlanes (and the default unnamed band)
    that actually hold a placement in this timeline -- an unused swimlane
-   never reserves a blank row."
+   never reserves a blank row.
+   When multiple placements share the same (col, row) cell they are placed
+   side-by-side (horizontal sub-slots) with the same gap as between slices;
+   the column widens to accommodate the maximum occupancy of any cell in it."
   [{:keys [slices placements elements swimlane-order]}]
   (let [ordered-slices (sort-by :index slices)
         col-index (into {} (map-indexed (fn [i s] [(:id s) i])) ordered-slices)
@@ -50,22 +53,47 @@
         used-raw-rows (vec (sort (distinct (map peek placement-raw-rows))))
         compacted-row (into {} (map-indexed (fn [i r] [r i])) used-raw-rows)
         row-count (count used-raw-rows)
+        ;; count placements per (col, row) cell; assign a sub-slot index to each
+        cell-counts (reduce (fn [acc [_ col raw-row]]
+                              (update acc [col raw-row] (fnil inc 0)))
+                            {} placement-raw-rows)
+        ;; max occupancy per column drives the column width
+        col-occupancy (reduce (fn [acc [[col _] n]]
+                                (update acc col (fnil max 1) n))
+                              {} cell-counts)
+        ;; column width = base slice-width * occupancy (extra cards share the same margin budget)
+        col-width (fn [col] (* slice-width (get col-occupancy col 1)))
+        ;; cumulative x-offset per column
+        col-x (reduce (fn [acc i]
+                        (conj acc (+ (or (peek acc) swimlane-label-width)
+                                     (col-width (dec i)))))
+                      [swimlane-label-width]
+                      (range 1 (inc (count ordered-slices))))
+        card-width (- slice-width (* 2 card-margin-h))
+        card-height (- swimlane-row-height (* 2 card-margin-v))
+        ;; assign sub-slot counters per cell
+        cell-slot-counter (atom {})
         placement-cells
         (for [[p col raw-row] placement-raw-rows
-              :let [row (get compacted-row raw-row)]]
+              :let [row (get compacted-row raw-row)
+                    slot (get (swap! cell-slot-counter update [col row] (fnil inc 0))
+                              [col row])
+                    ;; slot is 1-based after swap; convert to 0-based
+                    slot-idx (dec slot)]]
           {:placement-id (:id p)
            :element-id (:element p)
            :col col :row row
-            :rect {:x (+ swimlane-label-width (* col slice-width) card-margin-h)
-                   :y (+ slice-header-height (* row swimlane-row-height) card-margin-v)
-                   :width (- slice-width (* 2 card-margin-h))
-                   :height (- swimlane-row-height (* 2 card-margin-v))}})
+           :rect {:x (+ (nth col-x col) card-margin-h
+                        (* slot-idx (+ card-width (* 2 card-margin-h))))
+                  :y (+ slice-header-height (* row swimlane-row-height) card-margin-v)
+                  :width card-width
+                  :height card-height}})
+        table-width (nth col-x (count ordered-slices) swimlane-label-width)
         slice-headers
         (for [[i s] (map-indexed vector ordered-slices)]
           {:slice-id (:id s) :index i
-           :rect {:x (+ swimlane-label-width (* i slice-width)) :y 0.0
-                  :width slice-width :height slice-header-height}})
-        table-width (+ swimlane-label-width (* (count ordered-slices) slice-width))
+           :rect {:x (nth col-x i) :y 0.0
+                  :width (col-width i) :height slice-header-height}})
         swimlane-bands
         (for [raw-row used-raw-rows
               :let [row (get compacted-row raw-row)]]

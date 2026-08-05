@@ -83,6 +83,41 @@
       ;; vertical gap between adjacent swimlane rows = 4 * 16 = 64
       (is (= 64.0 (- (:y p3) (+ (:y p1) (:height p1))))))))
 
+(deftest layout-same-cell-placements-do-not-overlap-test
+  (testing "two placements in the same swimlane and same slice are placed side-by-side
+            with the same horizontal gap (48px) as between adjacent slices; the slice
+            column (and table) widens to fit both cards"
+    (let [slices [{:id :s1 :index 0}]
+          elements {:e1 {:swimlane :sw1} :e2 {:swimlane :sw1}}
+          placements [{:id :p1 :slice :s1 :element :e1}
+                      {:id :p2 :slice :s1 :element :e2}]
+          result (layout/layout-timeline {:slices slices :placements placements
+                                          :elements elements :swimlane-order [:sw1]})
+          by-id (into {} (map (juxt :placement-id identity)) (:placements result))
+          r1 (:rect (get by-id :p1))
+          r2 (:rect (get by-id :p2))
+          header (:rect (first (:slice-headers result)))
+          single-result (layout/layout-timeline {:slices slices
+                                                 :placements [{:id :p1 :slice :s1 :element :e1}]
+                                                 :elements elements :swimlane-order [:sw1]})]
+      ;; both cards produced
+      (is (some? r1))
+      (is (some? r2))
+      ;; same height and width (cards stay the same size)
+      (is (= (:width r1) (:width r2)))
+      (is (= (:height r1) (:height r2)))
+      ;; same vertical position (they share the same row and sub-slot)
+      (is (= (:y r1) (:y r2)))
+      ;; placed side-by-side: the second card starts exactly card-width + gap after the first
+      (let [gap 48.0]
+        (is (= gap (- (:x r2) (+ (:x r1) (:width r1))))))
+      ;; the slice column is wider than a single-placement column
+      (is (> (:width header)
+             (:width (:rect (first (:slice-headers single-result))))))
+      ;; the table is also wider
+      (is (> (get-in result [:size :width])
+             (get-in single-result [:size :width]))))))
+
 (deftest layout-timeline-size-scales-with-content-test
   (testing "table size grows with slice count and swimlane count"
     (let [one-slice (layout/layout-timeline {:slices [{:id :s1 :index 0}] :placements []
