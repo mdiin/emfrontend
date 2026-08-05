@@ -1,7 +1,7 @@
 (ns em-frontend.canvas
   "spec: the Canvas surface, plus the rendering conventions implied
    throughout the Rules section: canvas_fields per ElementKind, a persistent
-   amber border while is_information_complete = false, and the
+   red outer ring while is_information_complete = false, and the
    highlighted/dimmed connection styling FieldFlowHighlights declares.
    AGENTS.md calls for a CustomPainter doing viewport-culled painting; one
    painter is built per Timeline (matching the Canvas surface's own
@@ -163,10 +163,15 @@
   [^m/Canvas canvas rect element]
   (let [incomplete (false? (:is_information_complete element))
         kind-color (get element-kind-color (:kind element) m/Colors.grey)
-        rrect (m/RRect.fromRectAndRadius (rect->m rect) (m/Radius.circular 6.0))]
+        rrect (m/RRect.fromRectAndRadius (rect->m rect) (m/Radius.circular 6.0))
+        outer-rrect (m/RRect.fromRectAndRadius
+                      (m/Rect.fromLTWH (- (:x rect) 3.0) (- (:y rect) 3.0)
+                                       (+ (:width rect) 6.0) (+ (:height rect) 6.0))
+                      (m/Radius.circular 8.0))]
     (.drawRRect canvas rrect (fill-paint m/Colors.white))
-    (.drawRRect canvas rrect (stroke-paint (if incomplete m/Colors.amber kind-color)
-                                            (if incomplete 2.5 1.5)))
+    (.drawRRect canvas rrect (stroke-paint kind-color 1.5))
+    (when incomplete
+      (.drawRRect canvas outer-rrect (stroke-paint m/Colors.red 1.0)))
     (draw-text canvas (or (:name element) "") (+ (:x rect) 8.0) (+ (:y rect) 8.0)
                (m/TextStyle .fontWeight m/FontWeight.bold .fontSize 13.0 .color m/Colors.black)
                (- (:width rect) 16.0))
