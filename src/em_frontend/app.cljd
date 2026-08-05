@@ -160,14 +160,19 @@
    content-width/height (rule ViewportSnapsToContent's content_fit_zoom/
    content_center_pan_x/content_center_pan_y)."
   [st]
-  (let [zoom (double (get-in st [:visualization :zoom] 1.0))]
-    (reduce
-      (fn [{:keys [width height]} timeline-id]
-        (let [size (get-in (canvas/build-timeline-render-model st timeline-id) [:layout :size])]
-          {:width  (max width (:width size))
-           :height (+ height (:height size) (canvas/timeline-title-height zoom))}))
-      {:width 0.0 :height 0.0}
-      (keys (:timelines st)))))
+  (let [zoom         (double (get-in st [:visualization :zoom] 1.0))
+        timeline-ids (keys (:timelines st))
+        n            (count timeline-ids)
+        {:keys [width height]}
+        (reduce
+          (fn [{:keys [width height]} timeline-id]
+            (let [size (get-in (canvas/build-timeline-render-model st timeline-id) [:layout :size])]
+              {:width  (max width (:width size))
+               :height (+ height (:height size) (canvas/timeline-title-height zoom))}))
+          {:width 0.0 :height 0.0}
+          timeline-ids)]
+    {:width width
+     :height (+ height (* (dec n) (canvas/timeline-gap zoom)))}))
 
 (defn- snap-to-content!
   "Fits + centers the whole model in the viewport (rule
@@ -194,7 +199,8 @@
   (let [filtered     (get-in st [:visualization :filtered_timeline])
         active-ids   (if (some? filtered) [filtered] (keys (:timelines st)))
         fading-out   (:fading-out-timelines ui)
-        timeline-ids (into (vec active-ids) fading-out)]
+        timeline-ids (into (vec active-ids) fading-out)
+        zoom         (double (get-in st [:visualization :zoom] 1.0))]
     (m/Listener
       .onPointerSignal
       (fn [^g/PointerSignalEvent event]
@@ -234,16 +240,19 @@
         (m/Column
           .mainAxisSize m/MainAxisSize.min
           .children
-          (mapv (fn [tid]
-                  (m/AnimatedOpacity
-                    .key (m/ValueKey tid)
-                    .opacity (double (get (:timeline-target-opacities ui) tid 1.0))
-                    .duration (Duration .milliseconds config/animation-duration-ms)
-                    .onEnd (fn []
-                             (swap! ui-atom update :fading-out-timelines disj tid)
-                             nil)
-                    .child (timeline-widget st ui store-atom ui-atom tid)))
-                timeline-ids))))))
+          (vec
+            (interpose
+              (m/SizedBox .height (canvas/timeline-gap zoom))
+              (mapv (fn [tid]
+                      (m/AnimatedOpacity
+                        .key (m/ValueKey tid)
+                        .opacity (double (get (:timeline-target-opacities ui) tid 1.0))
+                        .duration (Duration .milliseconds config/animation-duration-ms)
+                        .onEnd (fn []
+                                 (swap! ui-atom update :fading-out-timelines disj tid)
+                                 nil)
+                        .child (timeline-widget st ui store-atom ui-atom tid)))
+                    timeline-ids))))))))
 
 ;; == Overlays: field-flow banner, error banner, selection panels ============
 

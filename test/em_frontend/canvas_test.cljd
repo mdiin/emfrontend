@@ -107,3 +107,10 @@
   (testing "title height at zoom 0.5 is larger than at zoom 1.0"
     (is (> (canvas/timeline-title-height 0.5)
            (canvas/timeline-title-height 1.0)))))
+
+;; == timeline-gap =============================================================
+
+(deftest timeline-gap-is-twice-title-height-test
+  (testing "gap between timelines equals 2× the title height"
+    (is (= (* 2.0 (canvas/timeline-title-height 1.0))
+           (canvas/timeline-gap 1.0)))))

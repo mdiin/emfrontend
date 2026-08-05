@@ -53,6 +53,11 @@
   ^double [^double zoom]
   (+ (timeline-title-font-size zoom) timeline-title-padding))
 
+(defn timeline-gap
+  "Vertical gap inserted between consecutive timelines — 2× the title height."
+  ^double [^double zoom]
+  (* 2.0 (timeline-title-height zoom)))
+
 ;; == Low-level drawing helpers ================================================
 
 (defn- ^m/Paint fill-paint [^m/Color color]
