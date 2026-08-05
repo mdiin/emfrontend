@@ -13,23 +13,26 @@
 (defn connection-details-panel
   "{:keys [connection from-name to-name on-close]}"
   [{:keys [connection from-name to-name on-close]}]
-  (m/Card
+  (m/SizedBox
+    .width double/infinity
     .child
-    (m/Padding
-      .padding (m/EdgeInsets.all 12.0)
+    (m/Card
       .child
-      (m/Column
-        .crossAxisAlignment m/CrossAxisAlignment.start
-        .mainAxisSize m/MainAxisSize.min
-        .children
-        [(m/Row
-           .mainAxisAlignment m/MainAxisAlignment.spaceBetween
-           .children
-           [(m/Text (str from-name " -> " to-name)
-                    .style (m/TextStyle .fontWeight m/FontWeight.bold .fontSize 16.0))
-            (m/IconButton .icon (m/Icon m/Icons.close) .onPressed (fn [] (on-close) nil))])
-         (m/Divider)
-         (m/Text "Derivations" .style (m/TextStyle .fontWeight m/FontWeight.w600))
-         (m/Column
-           .mainAxisSize m/MainAxisSize.min
-           .children (mapv derivation-tile (:derivations connection)))]))))
+      (m/Padding
+        .padding (m/EdgeInsets.all 12.0)
+        .child
+        (m/Column
+          .crossAxisAlignment m/CrossAxisAlignment.start
+          .mainAxisSize m/MainAxisSize.min
+          .children
+          [(m/Row
+             .mainAxisAlignment m/MainAxisAlignment.spaceBetween
+             .children
+             [(m/Text (str from-name " -> " to-name)
+                      .style (m/TextStyle .fontWeight m/FontWeight.bold .fontSize 16.0))
+              (m/IconButton .icon (m/Icon m/Icons.close) .onPressed (fn [] (on-close) nil))])
+           (m/Divider)
+           (m/Text "Derivations" .style (m/TextStyle .fontWeight m/FontWeight.w600))
+           (m/Column
+             .mainAxisSize m/MainAxisSize.min
+             .children (mapv derivation-tile (:derivations connection)))])))))

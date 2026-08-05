@@ -314,16 +314,18 @@
                                        (store/incoming-connections st (:id hovered-element)))))))
 
        (when-some [eid (:selected-element ui)]
-          (m/Align .alignment m/Alignment.centerRight
-           .child
-           (p.element-details/element-details-panel
-             {:element (get-in st [:elements eid])
-              :on-select-field
-              (fn [field-name] (apply-outcome! store-atom ui-atom (interaction/select-field-for-trace @store-atom field-name)))
-              :on-close (fn [] (swap! ui-atom assoc :selected-element nil))})))
+          (let [element (get-in st [:elements eid])]
+            (m/Align .alignment m/Alignment.bottomCenter
+             .child
+             (p.element-details/element-details-panel
+               {:element element
+                :swimlane-name (get-in st [:swimlanes (:swimlane element) :name])
+                :on-select-field
+                (fn [field-name] (apply-outcome! store-atom ui-atom (interaction/select-field-for-trace @store-atom field-name)))
+                :on-close (fn [] (swap! ui-atom assoc :selected-element nil))}))))
 
        (when-some [cid (:selected-connection ui)]
-         (m/Align .alignment m/Alignment.centerRight
+         (m/Align .alignment m/Alignment.bottomCenter
            .child
            (p.connection-details/connection-details-panel
              {:connection (get-in st [:connections cid])
