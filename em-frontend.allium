@@ -182,7 +182,22 @@ entity Element {
   -- True iff every field on the element is sourced (carried, derived, or
   -- introduced). When false, the card renders a persistent amber border and
   -- a hover tooltip listing the unsourced fields.
-  is_information_complete: Boolean
+  --   CARRIED    - some incoming connection's from-element has a field with
+  --                the same name; or
+  --   DERIVED    - some incoming connection carries a FieldDerivation naming
+  --                this field as its target, and every one of that
+  --                derivation's source_fields exists on that connection's
+  --                from-element (one source with a different name is a rename;
+  --                many is an aggregation; the transform is opaque); or
+  --   INTRODUCED - this element carries a FieldOrigin override for this field.
+  is_information_complete:
+    fields.all(f =>
+      incoming.any(c => c.from.fields.any(ff => ff.name = f.name))
+      or incoming.any(c => c.derivations.any(d =>
+          d.target_field = f.name
+          and d.source_fields.all(src =>
+              c.from.fields.any(sf => sf.name = src))))
+      or field_origins.any(o => o.field = f.name))
 
   fields: List<Field>
   field_origins: List<FieldOrigin>
@@ -201,8 +216,12 @@ entity Element {
   -- carried/derived by an incoming connection. These are the unsourced fields
   -- the incomplete tooltip lists.
   origin_field_names: field_origins -> field
-  derived_field_names: incoming.derivations -> target_field
+  carried_field_names: fields where incoming.any(c => c.from.fields.any(ff => ff.name = name)) -> name
+  derived_field_names: fields where incoming.any(c => c.derivations.any(d =>
+      d.target_field = name
+      and d.source_fields.all(src => c.from.fields.any(sf => sf.name = src)))) -> name
   unsourced_fields: fields where name not in origin_field_names
+    and name not in carried_field_names
     and name not in derived_field_names
 
   -- Fields shown directly on the canvas card, but only for the kinds whose

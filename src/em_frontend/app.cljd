@@ -310,8 +310,11 @@
            (m/Align .alignment m/Alignment.bottomRight
              .child
              (p.incomplete-tooltip/incomplete-tooltip
-               (model/unsourced-fields hovered-element
-                                       (store/incoming-connections st (:id hovered-element)))))))
+                (let [conns (store/incoming-connections st (:id hovered-element))
+                      conns-with-from (mapv #(assoc % :from-fields
+                                                    (:fields (get-in st [:elements (:from %)])))
+                                            conns)]
+                  (model/unsourced-fields hovered-element conns-with-from))))))
 
        (when-some [eid (:selected-element ui)]
           (let [element (get-in st [:elements eid])]

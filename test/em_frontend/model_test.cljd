@@ -1,8 +1,8 @@
 (ns em-frontend.model-test
   "spec: entity Element's derived values (origin_field_names,
-   derived_field_names, unsourced_fields, canvas_fields) -- categories
-   projection, entity_relationship, entity_optional, value_equality,
-   enum_comparable."
+   carried_field_names, derived_field_names, unsourced_fields, canvas_fields)
+   -- categories projection, entity_relationship, entity_optional,
+   value_equality, enum_comparable."
   (:require [cljd.test :refer [deftest is testing]]
             [em-frontend.model :as model]))
 
@@ -15,26 +15,80 @@
     (is (= #{"amount"} (model/origin-field-names {:field_origins [{:field "amount" :origin :user_input}]})))
     (is (= #{} (model/origin-field-names {:field_origins []})))))
 
+(deftest carried-field-names-test
+  (testing "same-name field on a from-element is carried"
+    (is (= #{"amount"}
+           (model/carried-field-names
+             {:fields [field-a]}
+             [{:from-fields [field-a] :derivations []}]))))
+  (testing "no match when from has no field of same name"
+    (is (= #{}
+           (model/carried-field-names
+             {:fields [field-a]}
+             [{:from-fields [field-c] :derivations []}]))))
+  (testing "no incoming connections -- nothing carried"
+    (is (= #{} (model/carried-field-names {:fields [field-a]} [])))))
+
 (deftest derived-field-names-test
-  (testing "incoming.derivations -> target_field, across every incoming connection"
-    (is (= #{"total"} (model/derived-field-names [{:derivations [{:target_field "total" :source_fields ["amount"]}]}])))
-    (is (= #{} (model/derived-field-names [])))
-    (is (= #{"total" "notes"}
-           (model/derived-field-names [{:derivations [{:target_field "total" :source_fields ["amount"]}]}
-                                        {:derivations [{:target_field "notes" :source_fields ["memo"]}]}])))))
+  (testing "fully-satisfied derivation sources the target field"
+    (is (= #{"total"}
+           (model/derived-field-names
+             [{:from-fields [field-a]
+               :derivations [{:target_field "total" :source_fields ["amount"]}]}]))))
+  (testing "derivation with absent source_field does not source the target"
+    (is (= #{}
+           (model/derived-field-names
+             [{:from-fields []
+               :derivations [{:target_field "total" :source_fields ["amount"]}]}]))))
+  (testing "aggregation: all source_fields must be present on the from-element"
+    (is (= #{}
+           (model/derived-field-names
+             [{:from-fields [field-a]
+               :derivations [{:target_field "total" :source_fields ["amount" "notes"]}]}]))))
+  (testing "multiple connections targeting the same field: any one satisfied derivation suffices"
+    (is (= #{"total"}
+           (model/derived-field-names
+             [{:from-fields []
+               :derivations [{:target_field "total" :source_fields ["amount"]}]}
+              {:from-fields [field-a]
+               :derivations [{:target_field "total" :source_fields ["amount"]}]}]))))
+  (testing "no connections -- nothing derived"
+    (is (= #{} (model/derived-field-names [])))))
 
 (deftest unsourced-fields-test
-  (testing "fields where name not in origin_field_names and not in derived_field_names"
-    (let [element {:fields [field-a field-b field-c] :field_origins [{:field "amount" :origin :user_input}]}
-          incoming [{:derivations [{:target_field "total" :source_fields ["amount"]}]}]]
-      (is (= [field-c] (model/unsourced-fields element incoming)))))
-  (testing "an origin and a derivation each independently source a field"
-    (let [element {:fields [field-a field-b] :field_origins [{:field "amount" :origin :user_input}]}
-          incoming [{:derivations [{:target_field "total" :source_fields ["amount"]}]}]]
-      (is (= [] (model/unsourced-fields element incoming)))))
-  (testing "no origin and no incoming connection at all -- every field unsourced"
-    (let [element {:fields [field-a field-b] :field_origins []}]
-      (is (= [field-a field-b] (model/unsourced-fields element []))))))
+  (testing "carried field (same name on from-element) is sourced"
+    (is (= [field-b]
+           (model/unsourced-fields
+             {:fields [field-a field-b] :field_origins []}
+             [{:from-fields [field-a] :derivations []}]))))
+  (testing "derived field sourced when derivation fully satisfied"
+    (is (= []
+           (model/unsourced-fields
+             {:fields [field-b] :field_origins []}
+             [{:from-fields [field-a]
+               :derivations [{:target_field "total" :source_fields ["amount"]}]}]))))
+  (testing "derived field unsourced when derivation source absent from from-element"
+    (is (= [field-b]
+           (model/unsourced-fields
+             {:fields [field-b] :field_origins []}
+             [{:from-fields []
+               :derivations [{:target_field "total" :source_fields ["amount"]}]}]))))
+  (testing "any one satisfied derivation across connections suffices"
+    (is (= []
+           (model/unsourced-fields
+             {:fields [field-b] :field_origins []}
+             [{:from-fields []
+               :derivations [{:target_field "total" :source_fields ["amount"]}]}
+              {:from-fields [field-a]
+               :derivations [{:target_field "total" :source_fields ["amount"]}]}]))))
+  (testing "introduced field sourced regardless of connections"
+    (is (= []
+           (model/unsourced-fields
+             {:fields [field-a] :field_origins [{:field "amount" :origin :user_input}]}
+             []))))
+  (testing "no origin, no incoming -- every field unsourced"
+    (is (= [field-a field-b]
+           (model/unsourced-fields {:fields [field-a field-b] :field_origins []} [])))))
 
 (deftest canvas-fields-test
   (testing "command/event/read_model show their fields on the canvas card"

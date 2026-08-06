@@ -23,24 +23,44 @@
   [element]
   (into #{} (map :field) (:field_origins element)))
 
+(defn carried-field-names
+  "entity Element .carried_field_names: names of fields on this element that
+   also appear as a field name on any incoming connection's from-element.
+   `incoming-with-from` is a seq of connections each augmented with
+   :from-fields (the from element's :fields vector)."
+  [element incoming-with-from]
+  (let [from-names (into #{} (comp (mapcat :from-fields) (map :name)) incoming-with-from)]
+    (into #{} (comp (map :name) (filter #(contains? from-names %))) (:fields element))))
+
 (defn derived-field-names
-  "entity Element .derived_field_names: incoming.derivations -> target_field
-   `incoming` is this element's incoming Connections, resolved by the caller
-   from the store (see em-frontend.store/incoming-connections)."
-  [incoming-connections]
+  "entity Element .derived_field_names: names of fields targeted by at least
+   one fully-satisfied incoming derivation -- every source_field exists on that
+   connection's from-element. Any one satisfied derivation suffices; multiple
+   derivations targeting the same field are evaluated independently.
+   `incoming-with-from` is a seq of connections each augmented with
+   :from-fields (the from element's :fields vector)."
+  [incoming-with-from]
   (into #{}
-        (comp (mapcat :derivations) (map :target_field))
-        incoming-connections))
+        (mapcat (fn [c]
+                  (let [from-names (into #{} (map :name) (:from-fields c))]
+                    (keep (fn [d]
+                            (when (every? #(contains? from-names %) (:source_fields d))
+                              (:target_field d)))
+                          (:derivations c)))))
+        incoming-with-from))
 
 (defn unsourced-fields
-  "entity Element .unsourced_fields: fields where name not in
-   origin_field_names and name not in derived_field_names.
-   These are exactly the fields the IncompleteTooltip surface lists."
-  [element incoming-connections]
+  "entity Element .unsourced_fields: fields not in origin_field_names,
+   carried_field_names, or derived_field_names.
+   `incoming-with-from` is a seq of connections each augmented with
+   :from-fields (the from element's :fields vector)."
+  [element incoming-with-from]
   (let [origins (origin-field-names element)
-        derived (derived-field-names incoming-connections)]
+        carried (carried-field-names element incoming-with-from)
+        derived (derived-field-names incoming-with-from)]
     (into [] (remove #(or (contains? origins (:name %))
-                           (contains? derived (:name %))))
+                          (contains? carried (:name %))
+                          (contains? derived (:name %))))
           (:fields element))))
 
 (defn canvas-fields
