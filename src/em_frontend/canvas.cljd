@@ -232,12 +232,12 @@
           (draw-wf-overlays canvas rect attrs field-names))
       (:h1 :h2 :h3)
       (let [sz (case tag :h1 14.0 :h2 12.0 13.0)]
-        (draw-text canvas (or (first children) "") x y
+        (draw-text canvas (str (or (first children) "")) x y
                    (m/TextStyle .fontWeight m/FontWeight.bold .fontSize sz .color m/Colors.black87)
                    w)
         (draw-wf-overlays canvas rect attrs field-names))
       (:text :span)
-      (do (draw-text canvas (or (first children) "") x y
+      (do (draw-text canvas (str (or (first children) "")) x y
                      (m/TextStyle .fontSize 11.0 .color m/Colors.black87)
                      w)
           (draw-wf-overlays canvas rect attrs field-names))
@@ -351,7 +351,8 @@
                       alpha   (get element-alphas element-id 1.0)]]
           (if (< alpha 1.0)
             (let [opacity-paint (doto (m/Paint)
-                                  (.-color! (m/Color.fromARGB (int (* 255.0 alpha)) 255 255 255)))]
+                                  (.-color! (m/Color.fromARGB (int (* 255.0 alpha)) 0 0 0))
+                                  (.-blendMode! m/BlendMode.modulate))]
               (.saveLayer canvas (rect->m rect) opacity-paint)
               (draw-element-card canvas rect element)
               (.restore canvas))

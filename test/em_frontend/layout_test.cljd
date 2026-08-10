@@ -128,36 +128,59 @@
 
 ;; == Screen element card sizing ===============================================
 
-(def screen-el {:id :es :kind :screen :swimlane nil})
+(def screen-el {:id :es :kind :screen :swimlane nil :wireframe {:tag :screen :attrs {} :children []}})
+(def screen-el-no-wf {:id :es :kind :screen :swimlane nil})
 (def command-el {:id :ec :kind :command :swimlane nil})
 
 (deftest screen-card-is-double-size-test
-  (testing "a screen element card is screen-card-width x screen-card-height"
+  (testing "a screen element with wireframe is screen-card-width x screen-card-height"
     (let [result (layout/layout-timeline {:slices [{:id :s1 :index 0}]
                                           :placements [{:id :p1 :slice :s1 :element :es}]
                                           :elements {:es screen-el}
                                           :swimlane-order []})
           r (:rect (first (:placements result)))]
       (is (= layout/screen-card-width (:width r)))
-      (is (= layout/screen-card-height (:height r))))))
+      (is (= layout/screen-card-height (:height r)))))
+  (testing "a screen element without wireframe uses standard card size"
+    (let [result (layout/layout-timeline {:slices [{:id :s1 :index 0}]
+                                          :placements [{:id :p1 :slice :s1 :element :es}]
+                                          :elements {:es screen-el-no-wf}
+                                          :swimlane-order []})
+          r (:rect (first (:placements result)))]
+      (is (= (- layout/slice-width (* 2 layout/card-margin-h)) (:width r)))
+      (is (= (- layout/swimlane-row-height (* 2 layout/card-margin-v)) (:height r))))))
 
 (deftest screen-widens-column-test
-  (testing "a slice column containing a screen is twice the base slice-width"
+  (testing "a slice column containing a screen with wireframe is twice the base slice-width"
     (let [result (layout/layout-timeline {:slices [{:id :s1 :index 0}]
                                           :placements [{:id :p1 :slice :s1 :element :es}]
                                           :elements {:es screen-el}
                                           :swimlane-order []})
           header-width (:width (:rect (first (:slice-headers result))))]
-      (is (= (* 2.0 layout/slice-width) header-width)))))
+      (is (= (* 2.0 layout/slice-width) header-width))))
+  (testing "a slice column containing a screen without wireframe uses standard slice-width"
+    (let [result (layout/layout-timeline {:slices [{:id :s1 :index 0}]
+                                          :placements [{:id :p1 :slice :s1 :element :es}]
+                                          :elements {:es screen-el-no-wf}
+                                          :swimlane-order []})
+          header-width (:width (:rect (first (:slice-headers result))))]
+      (is (= layout/slice-width header-width)))))
 
 (deftest screen-heightens-row-test
-  (testing "a row containing a screen uses screen-swimlane-row-height"
+  (testing "a row containing a screen with wireframe uses screen-swimlane-row-height"
     (let [result (layout/layout-timeline {:slices [{:id :s1 :index 0}]
                                           :placements [{:id :p1 :slice :s1 :element :es}]
                                           :elements {:es screen-el}
                                           :swimlane-order []})
           band-height (:height (:rect (first (:swimlane-bands result))))]
-      (is (= layout/screen-swimlane-row-height band-height)))))
+      (is (= layout/screen-swimlane-row-height band-height))))
+  (testing "a row containing a screen without wireframe uses standard row height"
+    (let [result (layout/layout-timeline {:slices [{:id :s1 :index 0}]
+                                          :placements [{:id :p1 :slice :s1 :element :es}]
+                                          :elements {:es screen-el-no-wf}
+                                          :swimlane-order []})
+          band-height (:height (:rect (first (:swimlane-bands result))))]
+      (is (= layout/swimlane-row-height band-height)))))
 
 (deftest non-screen-row-unaffected-test
   (testing "a row with only non-screen elements keeps the standard row height"
@@ -169,7 +192,7 @@
       (is (= layout/swimlane-row-height band-height)))))
 
 (deftest subsequent-row-y-offset-shifts-for-screen-test
-  (testing "when row 0 holds a screen, the element in row 1 starts below the taller row 0"
+  (testing "when row 0 holds a screen with wireframe, the element in row 1 starts below the taller row 0"
     (let [result (layout/layout-timeline
                    {:slices [{:id :s1 :index 0}]
                     :placements [{:id :p1 :slice :s1 :element :es}

@@ -56,11 +56,12 @@
           [p col (swimlane-row-index swimlane-order (:swimlane element))])
         used-raw-rows (vec (sort (distinct (map peek placement-raw-rows))))
         compacted-row (into {} (map-indexed (fn [i r] [r i])) used-raw-rows)
-        ;; track which cells contain a screen element (drives wider col / taller row)
+        ;; track which cells contain a screen element with a wireframe (drives wider col / taller row)
         cell-has-screen (into #{}
                               (keep (fn [[p col raw-row]]
-                                      (when (= :screen (:kind (get elements (:element p))))
-                                        [col raw-row])))
+                                      (let [el (get elements (:element p))]
+                                        (when (and (= :screen (:kind el)) (:wireframe el))
+                                          [col raw-row]))))
                               placement-raw-rows)
         col-has-screen (into #{} (map first) cell-has-screen)
         row-has-screen (into #{} (map second) cell-has-screen)
@@ -105,8 +106,8 @@
         placement-cells
         (for [[p col raw-row] placement-raw-rows
               :let [row (get compacted-row raw-row)
-                    element (get elements (:element p))
-                    screen? (= :screen (:kind element))
+                     element (get elements (:element p))
+                     screen? (and (= :screen (:kind element)) (:wireframe element))
                     cw (if screen? screen-card-width card-width)
                     ch (if screen? screen-card-height card-height)
                     slot (get (swap! cell-slot-counter update [col row] (fnil inc 0))
