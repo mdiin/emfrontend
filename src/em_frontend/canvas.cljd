@@ -160,6 +160,97 @@
      :elements (:elements store-val)
      :edges edge-lines}))
 
+;; == Wireframe renderer =======================================================
+
+(def ^:private wf-node-height
+  {:h1 20.0 :h2 18.0 :h3 16.0 :text 14.0 :span 14.0
+   :divider 8.0
+   :input 26.0 :textarea 34.0 :dropdown 26.0 :checkbox 22.0 :toggle 22.0
+   :button 24.0 :icon-button 24.0 :link 20.0
+   :image 48.0 :icon 18.0 :alert 24.0})
+
+(def ^:private wf-command-input-color (m/Color.fromARGB 60 33 150 243))
+(def ^:private wf-field-match-color   (m/Color.fromARGB 60 76 175 80))
+(def ^:private wf-field-miss-color    (m/Color.fromARGB 60 244 67 54))
+
+(defn- wf-node-h [node]
+  (get wf-node-height (:tag node) 20.0))
+
+(declare draw-wf-node)
+
+(defn- draw-wf-children
+  "Lays children of a col-like container top-to-bottom within `rect`."
+  [^m/Canvas canvas rect children element]
+  (let [inner-w (- (:width rect) 4.0)]
+    (loop [children children
+           y (:y rect)]
+      (when-some [node (first children)]
+        (let [h (wf-node-h node)
+              child-rect {:x (+ (:x rect) 2.0) :y y :width inner-w :height h}]
+          (draw-wf-node canvas child-rect node element)
+          (recur (rest children) (+ y h 2.0)))))))
+
+(defn- draw-wf-row-children
+  "Lays children of a row container left-to-right within `rect`."
+  [^m/Canvas canvas rect children element]
+  (let [n (count children)]
+    (when (pos? n)
+      (let [slot-w (/ (:width rect) n)]
+        (dorun
+         (map-indexed
+          (fn [i node]
+            (let [child-rect {:x (+ (:x rect) (* i slot-w)) :y (:y rect)
+                              :width slot-w :height (:height rect)}]
+              (draw-wf-node canvas child-rect node element)))
+          children))))))
+
+(defn- draw-wf-overlays
+  "Semi-transparent command-input (blue) and field-name (green/red) overlays.
+   Applied to every node that carries those attrs, regardless of tag."
+  [^m/Canvas canvas rect attrs field-names]
+  (let [r (m/RRect.fromRectAndRadius (rect->m rect) (m/Radius.circular 3.0))]
+    (when (:command-input attrs)
+      (.drawRRect canvas r (fill-paint wf-command-input-color)))
+    (when-some [fn-attr (:field-name attrs)]
+      (if (contains? field-names fn-attr)
+        (.drawRRect canvas r (fill-paint wf-field-match-color))
+        (.drawRRect canvas r (fill-paint wf-field-miss-color))))))
+
+(defn- draw-wf-node
+  [^m/Canvas canvas rect node element]
+  (let [{:keys [tag attrs children]} node
+        field-names (into #{} (map :name) (:fields element))
+        x (:x rect) y (:y rect) w (:width rect) h (:height rect)]
+    (case tag
+      :screen (draw-wf-children canvas rect children element)
+      :col    (draw-wf-children canvas rect children element)
+      :row    (draw-wf-row-children canvas rect children element)
+      :divider
+      (do (.drawLine canvas (m/Offset x (+ y (/ h 2.0)))
+                            (m/Offset (+ x w) (+ y (/ h 2.0)))
+                            (stroke-paint m/Colors.grey.shade400 1.0))
+          (draw-wf-overlays canvas rect attrs field-names))
+      (:h1 :h2 :h3)
+      (let [sz (case tag :h1 14.0 :h2 12.0 13.0)]
+        (draw-text canvas (or (first children) "") x y
+                   (m/TextStyle .fontWeight m/FontWeight.bold .fontSize sz .color m/Colors.black87)
+                   w)
+        (draw-wf-overlays canvas rect attrs field-names))
+      (:text :span)
+      (do (draw-text canvas (or (first children) "") x y
+                     (m/TextStyle .fontSize 11.0 .color m/Colors.black87)
+                     w)
+          (draw-wf-overlays canvas rect attrs field-names))
+      ;; leaf interactive nodes: draw a light rounded-rect outline then overlays
+      (let [r (m/RRect.fromRectAndRadius (m/Rect.fromLTWH x y w h) (m/Radius.circular 3.0))
+            label (or (:label attrs) (:placeholder attrs) (:alt attrs)
+                      (:name attrs) (str (name tag)))]
+        (.drawRRect canvas r (stroke-paint m/Colors.grey.shade400 1.0))
+        (draw-wf-overlays canvas rect attrs field-names)
+        (draw-text canvas label (+ x 4.0) (+ y (/ (- h 11.0) 2.0))
+                   (m/TextStyle .fontSize 10.0 .color m/Colors.grey.shade700)
+                   (- w 8.0))))))
+
 ;; == The painter ===============================================================
 
 (defn- draw-element-card
@@ -180,11 +271,16 @@
     (draw-text canvas (or (:name element) "") (+ (:x rect) 8.0) (+ (:y rect) 8.0)
                (m/TextStyle .fontWeight m/FontWeight.bold .fontSize 13.0 .color m/Colors.black)
                (- (:width rect) 16.0))
-    (doseq [[i field] (map-indexed vector (take 4 (model/canvas-fields element)))]
-      (draw-text canvas (str (:name field) ": " (name (or (:type field) "")))
-                 (+ (:x rect) 8.0) (+ (:y rect) 28.0 (* i 16.0))
-                 (m/TextStyle .fontSize 11.0 .color m/Colors.grey.shade700)
-                 (- (:width rect) 16.0)))))
+    (if (and (= :screen (:kind element)) (:wireframe element))
+      (let [content-rect {:x (+ (:x rect) 8.0) :y (+ (:y rect) 28.0)
+                          :width (- (:width rect) 16.0)
+                          :height (- (:height rect) 36.0)}]
+        (draw-wf-node canvas content-rect (:wireframe element) element))
+      (doseq [[i field] (map-indexed vector (take 4 (model/canvas-fields element)))]
+        (draw-text canvas (str (:name field) ": " (name (or (:type field) "")))
+                   (+ (:x rect) 8.0) (+ (:y rect) 28.0 (* i 16.0))
+                   (m/TextStyle .fontSize 11.0 .color m/Colors.grey.shade700)
+                   (- (:width rect) 16.0))))))
 
 (defn timeline-painter
   "render-model: as returned by build-timeline-render-model, plus

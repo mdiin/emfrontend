@@ -15,6 +15,10 @@
 (def card-margin-h 24.0)
 (def card-margin-v 32.0)
 
+(def screen-card-width (* 2.0 (- slice-width (* 2 card-margin-h))))
+(def screen-card-height (* 2.0 (- swimlane-row-height (* 2 card-margin-v))))
+(def screen-swimlane-row-height (+ screen-card-height (* 2 card-margin-v)))
+
 (defn- index-of [coll x]
   (first (keep-indexed (fn [i v] (when (= v x) i)) coll)))
 
@@ -41,7 +45,7 @@
    When multiple placements share the same (col, row) cell they are placed
    side-by-side (horizontal sub-slots) with the same gap as between slices;
    the column widens to accommodate the maximum occupancy of any cell in it."
-  [{:keys [slices placements elements swimlane-order]}]
+   [{:keys [slices placements elements swimlane-order]}]
   (let [ordered-slices (sort-by :index slices)
         col-index (into {} (map-indexed (fn [i s] [(:id s) i])) ordered-slices)
         placement-raw-rows
@@ -52,7 +56,14 @@
           [p col (swimlane-row-index swimlane-order (:swimlane element))])
         used-raw-rows (vec (sort (distinct (map peek placement-raw-rows))))
         compacted-row (into {} (map-indexed (fn [i r] [r i])) used-raw-rows)
-        row-count (count used-raw-rows)
+        ;; track which cells contain a screen element (drives wider col / taller row)
+        cell-has-screen (into #{}
+                              (keep (fn [[p col raw-row]]
+                                      (when (= :screen (:kind (get elements (:element p))))
+                                        [col raw-row])))
+                              placement-raw-rows)
+        col-has-screen (into #{} (map first) cell-has-screen)
+        row-has-screen (into #{} (map second) cell-has-screen)
         ;; count placements per (col, row) cell; assign a sub-slot index to each
         cell-counts (reduce (fn [acc [_ col raw-row]]
                               (update acc [col raw-row] (fnil inc 0)))
@@ -61,8 +72,12 @@
         col-occupancy (reduce (fn [acc [[col _] n]]
                                 (update acc col (fnil max 1) n))
                               {} cell-counts)
-        ;; column width = base slice-width * occupancy (extra cards share the same margin budget)
-        col-width (fn [col] (* slice-width (get col-occupancy col 1)))
+        ;; column width: screen columns are at least 2*slice-width; others = slice-width * occupancy
+        col-width (fn [col]
+                    (let [base (* slice-width (get col-occupancy col 1))]
+                      (if (contains? col-has-screen col)
+                        (max (* 2.0 slice-width) base)
+                        base)))
         ;; cumulative x-offset per column
         col-x (reduce (fn [acc i]
                         (conj acc (+ (or (peek acc) swimlane-label-width)
@@ -71,11 +86,29 @@
                       (range 1 (inc (count ordered-slices))))
         card-width (- slice-width (* 2 card-margin-h))
         card-height (- swimlane-row-height (* 2 card-margin-v))
+        ;; per-row height: screen rows get screen-swimlane-row-height
+        row-height (fn [raw-row]
+                     (if (contains? row-has-screen raw-row)
+                       screen-swimlane-row-height
+                       swimlane-row-height))
+        ;; cumulative y-offsets per compacted row index (from raw-row order)
+        row-y (reduce (fn [acc raw-row]
+                        (let [row (get compacted-row raw-row)]
+                          (assoc acc row (+ slice-header-height
+                                           (reduce + 0.0
+                                                   (map (fn [rr] (row-height rr))
+                                                        (take row used-raw-rows)))))))
+                      {}
+                      used-raw-rows)
         ;; assign sub-slot counters per cell
         cell-slot-counter (atom {})
         placement-cells
         (for [[p col raw-row] placement-raw-rows
               :let [row (get compacted-row raw-row)
+                    element (get elements (:element p))
+                    screen? (= :screen (:kind element))
+                    cw (if screen? screen-card-width card-width)
+                    ch (if screen? screen-card-height card-height)
                     slot (get (swap! cell-slot-counter update [col row] (fnil inc 0))
                               [col row])
                     ;; slot is 1-based after swap; convert to 0-based
@@ -85,9 +118,9 @@
            :col col :row row
            :rect {:x (+ (nth col-x col) card-margin-h
                         (* slot-idx (+ card-width (* 2 card-margin-h))))
-                  :y (+ slice-header-height (* row swimlane-row-height) card-margin-v)
-                  :width card-width
-                  :height card-height}})
+                  :y (+ (get row-y row slice-header-height) card-margin-v)
+                  :width cw
+                  :height ch}})
         table-width (nth col-x (count ordered-slices) swimlane-label-width)
         slice-headers
         (for [[i s] (map-indexed vector ordered-slices)]
@@ -96,12 +129,15 @@
                   :width (col-width i) :height slice-header-height}})
         swimlane-bands
         (for [raw-row used-raw-rows
-              :let [row (get compacted-row raw-row)]]
+              :let [row (get compacted-row raw-row)
+                    rh (row-height raw-row)]]
           {:row row
            :swimlane-id (when (pos? raw-row) (nth swimlane-order (dec raw-row) nil))
-           :rect {:x 0.0 :y (+ slice-header-height (* row swimlane-row-height))
-                  :width table-width :height swimlane-row-height}})]
+           :rect {:x 0.0 :y (get row-y row slice-header-height)
+                  :width table-width :height rh}})
+        total-height (+ slice-header-height
+                        (reduce + 0.0 (map row-height used-raw-rows)))]
     {:placements placement-cells
      :slice-headers slice-headers
      :swimlane-bands swimlane-bands
-     :size {:width table-width :height (+ slice-header-height (* row-count swimlane-row-height))}}))
+     :size {:width table-width :height total-height}}))

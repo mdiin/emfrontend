@@ -55,12 +55,28 @@
 (defn- norm-example [m]
   {:field_name (get m "field_name") :field_value (get m "field_value")})
 
+(defn- norm-wireframe-node
+  "Normalizes one WireframeNode from its JSON wire shape
+   [tag-str, {attrs-including-\"-id\"}, ...children]
+   into {:tag :keyword :attrs {kw val} :children [...]} with \"-id\" stripped."
+  [node]
+  (let [tag     (keyword (get node 0))
+        raw     (get node 1)
+        attrs   (into {} (keep (fn [[k v]]
+                                 (when (not= k "-id")
+                                   [(keyword k) v])))
+                      raw)
+        children (mapv (fn [c]
+                         (if (string? c) c (norm-wireframe-node c)))
+                       (drop 2 node))]
+    {:tag tag :attrs attrs :children children}))
+
 (defn- norm-element
   "Handles both shapes: a delta's flat canonical element entity (context,
-   field_origins, image_url always present when set) and the snapshot's
-   reduced embedded element (id, name, kind, swimlane, is_information_complete,
-   fields only -- context/field_origins/image_url are simply absent until a
-   later delta fills them in; `get` on a missing key is nil either way)."
+   field_origins, image_url, wireframe always present when set) and the
+   snapshot's embedded element (id, name, kind, swimlane,
+   is_information_complete, fields only -- other keys are simply absent until
+   a later delta fills them in; `get` on a missing key is nil either way)."
   [m]
   {:id (get m "id")
    :name (get m "name")
@@ -70,7 +86,8 @@
    :fields (mapv norm-field (or (get m "fields") []))
    :field_origins (mapv norm-field-origin (or (get m "field_origins") []))
    :swimlane (get m "swimlane")
-   :image_url (get m "image_url")})
+   :image_url (get m "image_url")
+   :wireframe (when-some [wf (get m "wireframe")] (norm-wireframe-node wf))})
 
 (defn- norm-connection-delta
   "A delta's connection entity: `from`/`to` are already bare ids."

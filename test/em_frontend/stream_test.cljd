@@ -55,7 +55,7 @@
     (is (= {:entity :element :change :created
             :data {:id 5 :name "PlaceOrder" :kind :command :context :internal
                    :is_information_complete nil :fields [] :field_origins []
-                   :swimlane nil :image_url nil}}
+                   :swimlane nil :image_url nil :wireframe nil}}
            (first changes)))))
 
 (deftest normalize-updated-element-delta-test
@@ -90,3 +90,68 @@
 (deftest normalize-changes-invalid-payload-test
   (is (nil? (stream/normalize-changes "not json at all")))
   (is (nil? (stream/normalize-changes "{\"op\":\"Whatever\"}")) "no changes[] at all"))
+
+;; AddWireframeNode delta: screen element with a nested wireframe tree.
+;; Wire shape: ["screen", {"-id":"n1"}, ["col", {"-id":"n2"},
+;;   ["h1", {"-id":"n3"}, "Your orders"],
+;;   ["input", {"-id":"n4", "placeholder":"Search...", "field-name":"orderId", "command-input":true}]]]
+(def delta-add-wireframe
+  (str "{\"op\":\"AddWireframeNode\",\"changes\":[{\"action\":\"updated\","
+       "\"type\":\"element\",\"id\":4,\"entity\":{\"model\":1,\"name\":\"OrderScreen\","
+       "\"kind\":\"screen\",\"context\":\"internal\","
+       "\"fields\":[{\"name\":\"orderId\",\"type\":\"uuid\",\"optional\":false,"
+       "\"cardinality\":\"single\",\"subfields\":[]}],"
+       "\"wireframe\":[\"screen\",{\"-id\":\"n1\"},"
+       "[\"col\",{\"-id\":\"n2\"},"
+       "[\"h1\",{\"-id\":\"n3\"},\"Your orders\"],"
+       "[\"input\",{\"-id\":\"n4\",\"placeholder\":\"Search...\","
+       "\"field-name\":\"orderId\",\"command-input\":true}]]],"
+       "\"id\":4,\"type\":\"element\"}}]}"))
+
+(deftest normalize-wireframe-delta-test
+  (let [changes (stream/normalize-changes delta-add-wireframe)
+        wf (get-in changes [0 :data :wireframe])]
+    (testing "root tag is :screen"
+      (is (= :screen (:tag wf))))
+    (testing "-id is stripped from root attrs"
+      (is (nil? (get-in wf [:attrs :-id])))
+      (is (empty? (:attrs wf))))
+    (testing "first child of :screen is :col"
+      (is (= :col (get-in wf [:children 0 :tag]))))
+    (testing "h1 nested under col, with string text child"
+      (is (= :h1 (get-in wf [:children 0 :children 0 :tag])))
+      (is (= "Your orders" (get-in wf [:children 0 :children 0 :children 0]))))
+    (testing "input node with attrs; -id stripped; field-name stays string; command-input stays bool"
+      (let [inp (get-in wf [:children 0 :children 1])]
+        (is (= :input (:tag inp)))
+        (is (nil? (get-in inp [:attrs :-id])))
+        (is (= "Search..." (get-in inp [:attrs :placeholder])))
+        (is (= "orderId" (get-in inp [:attrs :field-name])))
+        (is (true? (get-in inp [:attrs :command-input])))))
+    (testing "wireframe is nil when field is absent"
+      (is (nil? (get-in (first (stream/normalize-changes delta-create-element))
+                        [:data :wireframe]))))))
+
+;; Snapshot with a wireframe on a placed screen element.
+(def snapshot-with-wireframe
+  (str "{\"op\":\"snapshot\",\"model\":{\"id\":1,\"name\":\"m\","
+       "\"timelines\":[{\"id\":2,\"title\":\"T\","
+       "\"slices\":[{\"id\":3,\"title\":\"S\",\"kind\":\"state_change\","
+       "\"status\":\"created\",\"index\":0,"
+       "\"placements\":[{\"id\":4,"
+       "\"element\":{\"id\":5,\"name\":\"OrderScreen\",\"kind\":\"screen\","
+       "\"is_information_complete\":true,"
+       "\"fields\":[],"
+       "\"wireframe\":[\"screen\",{\"-id\":\"n1\"},"
+       "[\"h1\",{\"-id\":\"n2\"},\"Hello\"]]}}],"
+       "\"specifications\":[]}]}],"
+       "\"swimlanes\":[],\"connections\":[]}}"))
+
+(deftest normalize-snapshot-wireframe-test
+  (let [seed (stream/normalize-snapshot snapshot-with-wireframe)
+        wf (get-in seed [:elements 5 :wireframe])]
+    (testing "wireframe present on snapshot-embedded screen element"
+      (is (= :screen (:tag wf))))
+    (testing "h1 text child intact through snapshot normalization"
+      (is (= :h1 (get-in wf [:children 0 :tag])))
+      (is (= "Hello" (get-in wf [:children 0 :children 0]))))))
