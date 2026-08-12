@@ -178,6 +178,16 @@
 
 (declare draw-wf-node)
 
+(defn wf-leaf-label
+  "Display label for a leaf wireframe node: the first naming attr
+   (:label, :placeholder, :alt, :name), else the tag's name without the
+   colon. Returns nil when the node has no tag at all (bare string children
+   have no :tag), so callers fall back to an empty string instead of
+   calling name on nil."
+  [tag attrs]
+  (or (:label attrs) (:placeholder attrs) (:alt attrs) (:name attrs)
+      (when tag (name tag))))
+
 (defn- draw-wf-children
   "Lays children of a col-like container top-to-bottom within `rect`."
   [^m/Canvas canvas rect children element]
@@ -217,8 +227,14 @@
         (.drawRRect canvas r (fill-paint wf-field-miss-color))))))
 
 (defn- draw-wf-node
+  "Bare string children (plain text in the wire DSL) render via the :text
+   branch; map children dispatch on their :tag. A node with no :tag falls
+   through to the generic leaf branch without crashing."
   [^m/Canvas canvas rect node element]
-  (let [{:keys [tag attrs children]} node
+  (let [{:keys [tag attrs children]}
+        (if (string? node)
+          {:tag :text :attrs {} :children [node]}
+          node)
         field-names (into #{} (map :name) (:fields element))
         x (:x rect) y (:y rect) w (:width rect) h (:height rect)]
     (case tag
@@ -243,8 +259,7 @@
           (draw-wf-overlays canvas rect attrs field-names))
       ;; leaf interactive nodes: draw a light rounded-rect outline then overlays
       (let [r (m/RRect.fromRectAndRadius (m/Rect.fromLTWH x y w h) (m/Radius.circular 3.0))
-            label (or (:label attrs) (:placeholder attrs) (:alt attrs)
-                      (:name attrs) (str (name tag)))]
+            label (or (wf-leaf-label tag attrs) "")]
         (.drawRRect canvas r (stroke-paint m/Colors.grey.shade400 1.0))
         (draw-wf-overlays canvas rect attrs field-names)
         (draw-text canvas label (+ x 4.0) (+ y (/ (- h 11.0) 2.0))

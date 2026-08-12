@@ -114,3 +114,21 @@
   (testing "gap between timelines equals 2× the title height"
     (is (= (* 2.0 (canvas/timeline-title-height 1.0))
            (canvas/timeline-gap 1.0)))))
+
+;; == wf-leaf-label ============================================================
+
+(deftest wf-leaf-label-attr-priority-test
+  (testing "leaf label prefers label, then placeholder, then alt, then name"
+    (let [attrs {:label "Go" :placeholder "Search..." :alt "img" :name "f"}]
+      (is (= "Go" (canvas/wf-leaf-label :button attrs)))
+      (is (= "Search..." (canvas/wf-leaf-label :input (dissoc attrs :label))))
+      (is (= "img" (canvas/wf-leaf-label :image (dissoc attrs :label :placeholder))))
+      (is (= "f" (canvas/wf-leaf-label :input (dissoc attrs :label :placeholder :alt)))))))
+
+(deftest wf-leaf-label-falls-back-to-tag-name-test
+  (testing "with no naming attrs, the label is the tag's name without the colon"
+    (is (= "button" (canvas/wf-leaf-label :button {})))))
+
+(deftest wf-leaf-label-nil-tag-test
+  (testing "a node with no tag (e.g. a bare string child) yields nil, not a crash"
+    (is (nil? (canvas/wf-leaf-label nil {})))))
