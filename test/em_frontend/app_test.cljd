@@ -1,0 +1,30 @@
+(ns em-frontend.app-test
+  "spec: `Rules` and `Invariants` sections of em-frontend.allium -- the
+   side effects of the reseed path on the transient ui state. Rule
+   ReconnectPreservesViewport reseeds the store from a fresh snapshot; the
+   ui map's in-flight animation state and error overlay belong to the
+   discarded store, so apply-outcome!'s :store-seeded branch resets them via
+   ui-after-reseed -- consistent with @invariant NoReplay."
+  (:require [cljd.test :refer [deftest is testing]]
+            [em-frontend.app :as app]))
+
+(deftest ui-after-reseed-resets-reseed-scoped-state-test
+  (testing "a reseed clears every in-flight animation map and the
+            failed-connection overlay, and leaves unrelated ui keys alone"
+    (let [ui {:element-target-alphas {:e1 1.0}
+              :element-current-alphas {:e1 0.5}
+              :fading-out-timelines #{:t1}
+              :timeline-target-opacities {:t1 0.0}
+              :failed-connection {:id :c1}
+              :selected-element :e1
+              :connection-visual {:c1 :highlighted}}
+          after (app/ui-after-reseed ui)]
+      (is (= {} (:element-target-alphas after)))
+      (is (= {} (:element-current-alphas after)))
+      (is (= #{} (:fading-out-timelines after)))
+      (is (= {} (:timeline-target-opacities after)))
+      (is (nil? (:failed-connection after)))
+      (is (= :e1 (:selected-element after))
+          "a key outside the reseed's scope survives")
+      (is (= {:c1 :highlighted} (:connection-visual after))
+          "the field-flow highlight is view-local and survives"))))

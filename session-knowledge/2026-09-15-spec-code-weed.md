@@ -289,7 +289,8 @@ Re-checked against the current tree; all still as previously recorded. **Do not
    retiring the live driver and starting a fresh attempt (section 1, point 3).
 9. **no-action** for all of class C (section 4).
 10. **triage** for the remaining B items (B2–B9; B2 in particular needs an
-    async/HTTP harness before it can even be attempted).
+    async/HTTP harness before it can even be attempted). *(partly done — B3–B8
+    triaged; B2 and B9 left unhandled)*
 
 > **2026-09-15 — A4/A5/B1 closed.** The three (items 4–6 above) are now
 > resolved; **A3 remains open**, and its wireframe fixture was deliberately left
@@ -306,6 +307,46 @@ Re-checked against the current tree; all still as previously recorded. **Do not
 > `2026-09-15-spec-code-alignment.md` section b). The preamble verdict above
 > ("three remain open (A3, A4, A5)") is left verbatim: it records the state the
 > pass itself measured.
+
+> **2026-09-15 — B3–B8 triaged.**
+> - **B3 — no action, by decision.** `@guarantee LargeModelScale` is kept as
+>   wording: nothing in this harness can measure responsiveness at thousands of
+>   elements (there is no benchmark/timing harness and the paint half needs a
+>   real `m/Canvas`), so the guarantee stays aspirational rather than gaining a
+>   test that asserts something adjacent.
+> - **B4 — resolved.** The shade choice moved out of `paint` into the pure
+>   `band-shade` helper (`canvas.cljd`, called by the painter), with
+>   `band-shade-alternates-test`. It asserts the alternation shape (parity), not
+>   the pixel colour — which is all "visually distinguished" requires.
+> - **B6 — resolved, both halves.** (i) The three hit-test helpers now take
+>   plain widget-local `x`/`y` instead of an `m/Offset`, which was the only
+>   reason they were unreachable from `cljd.test`; all nine call sites are in
+>   `app.cljd` and were adapted with no behaviour change. Six tests cover
+>   placement hits/misses, the inclusive right/bottom edges, slice headers and
+>   edge proximity. (ii) The missing opening triggers are now a stated decision
+>   rather than an oversight: the spec's Surfaces section records that the
+>   selection/hover/expansion state which opens the panels and tooltips is
+>   transient renderer state held outside the model and is deliberately
+>   unmodelled.
+> - **B7 — resolved as documentation.** A spec note now states that `loading` is
+>   resolved to `rendered`/`empty` within the same application and is never an
+>   observable resting state (the pre-snapshot spinner is the absence of a
+>   `Visualization`), and `app.cljd`'s dead `:loading` case comment was
+>   corrected. No behaviour change.
+> - **B8 — resolved.** The reseed's `:delta-queue` drop is asserted in
+>   `reconnect-preserves-viewport-test`; the app's reseed-scoped ui resets were
+>   extracted as the pure `ui-after-reseed` and are covered by the new
+>   `test/em_frontend/app_test.cljd` — the app's first test namespace; and
+>   `ReconnectPreservesViewport`'s comment now states the side effects. Caveat:
+>   that a reseed *must* discard the deferred queue is still only implied by
+>   `@invariant NoReplay`, not stated as an obligation of its own.
+> - **B2 and B9 — left unhandled by decision.**
+> Verification: `clj -M:cljd:test test` exit 0 with `+107: All tests passed!`
+> (was 100), `clj -M:cljd clean && clj -M:cljd compile` exit 0, and
+> `/home/mvi/.local/bin/allium check em-frontend.allium` exit 1 with the same
+> five diagnostics at lines 37/40/40/139/258 — all three spec prose insertions
+> sit below line 258, so the recorded baseline did not move (the spec grew 1161
+> → 1173 lines).
 
 ---
 

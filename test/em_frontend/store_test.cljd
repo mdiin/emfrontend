@@ -65,13 +65,15 @@
           zoomed (assoc-in zoomed [:visualization :pan_x] 40.0)
           zoomed (assoc-in zoomed [:visualization :filtered_timeline] :t1)
           zoomed (assoc-in zoomed [:visualization :interacting] true)
+          zoomed (assoc zoomed :delta-queue [[{:entity :slice :change :updated :data {:id :s1}}]])
           {:keys [store]} (store/snapshot-received zoomed snapshot-empty)]
       (is (= 2.5 (get-in store [:visualization :zoom])))
       (is (= 40.0 (get-in store [:visualization :pan_x])))
       (is (= :t1 (get-in store [:visualization :filtered_timeline])))
       (is (true? (get-in store [:visualization :interacting])))
       (is (= :empty (get-in store [:visualization :state])) "reseed re-evaluates loading -> empty/rendered")
-      (is (= {} (:timelines store)) "stale delta-built timelines are discarded, not merged"))))
+      (is (= {} (:timelines store)) "stale delta-built timelines are discarded, not merged")
+      (is (= [] (:delta-queue store)) "deltas held for deferred application belong to the discarded store"))))
 
 ;; == SSE connection state machine =============================================
 

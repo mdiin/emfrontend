@@ -364,7 +364,10 @@ rule SnapshotCreatesModel {
 
 -- On reconnect a fresh snapshot arrives. Discard the delta-built store and
 -- reseed it, but preserve the current zoom and pan so the user keeps their
--- viewport. Filter and trace state are view-local and also preserved.
+-- viewport. Filter and trace state are view-local and also preserved. A
+-- reseed also discards any deltas held for deferred application (the queue
+-- belongs to the discarded store) and clears in-flight animation and
+-- error-overlay state.
 rule ReconnectPreservesViewport {
   when: SnapshotReceived(source, seed)
   requires: exists Visualization
@@ -376,6 +379,11 @@ rule ReconnectPreservesViewport {
     StoreSeeded(seed: seed, model: EventModel)
 }
 
+-- `loading` is the state a fresh or reseeded Visualization is created in;
+-- the two rules below resolve it to rendered/empty within the same
+-- application, so it is never an observable resting state. The spinner a
+-- viewer sees before the first snapshot is the absence of a Visualization,
+-- not this state.
 -- A snapshot with no timelines renders as empty, not error. Timelines are
 -- the primary visible structure; a model that has timelines but no
 -- placements or connections yet still renders those (empty) timeline rows
@@ -913,6 +921,10 @@ actor StreamSource {
 -- Surfaces
 ------------------------------------------------------------
 
+-- The transient viewer state that opens these panels and tooltips --
+-- selection, hover, slice expansion -- is renderer state held outside the
+-- model, and is deliberately unmodelled: a surface declares what it exposes
+-- and the actions it provides, not the gesture that opens it.
 -- Read-only side panel for a clicked element. Selecting a field here starts a
 -- field-flow trace (see FieldFlowTrace).
 surface ElementDetails {

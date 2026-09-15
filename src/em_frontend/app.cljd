@@ -35,6 +35,21 @@
 
 (def ^:private ^m/GlobalKey viewport-key (f/global-key ::viewport))
 
+(defn ui-after-reseed
+  "The ui-atom map after a reseed: a successful reconnect/retry reseeds from a
+   fresh snapshot, so there is no failed connection left to report, and the
+   in-flight element/timeline animation state belongs to the discarded store
+   and is reset with it."
+  [ui]
+  (assoc ui
+         :element-target-alphas {}
+         :element-current-alphas {}
+         :fading-out-timelines #{}
+         :timeline-target-opacities {}
+         ;; a successful reconnect/retry reseeds from a fresh snapshot,
+         ;; so there is no failed connection left to report
+         :failed-connection nil))
+
 (defn- apply-outcome!
   "Applies a {:store :effects} rule result: swaps the domain store, and
    folds ConnectionHighlighted/ConnectionDimmed effects into ui-atom's
@@ -84,14 +99,7 @@
                              (update :fading-out-timelines conj (:timeline fx))
                              (assoc-in [:timeline-target-opacities (:timeline fx)] 0.0))))
       :store-seeded
-        (swap! ui-atom assoc
-               :element-target-alphas {}
-               :element-current-alphas {}
-               :fading-out-timelines #{}
-               :timeline-target-opacities {}
-               ;; a successful reconnect/retry reseeds from a fresh snapshot,
-               ;; so there is no failed connection left to report
-               :failed-connection nil)
+        (swap! ui-atom ui-after-reseed)
       nil)))
 
 ;; == Starting (and restarting) the stream ====================================
@@ -184,25 +192,26 @@
         (let [pt     (adjust-pt (.-localPosition details))
               layout (:layout render-model)]
           (cond
-            (some? (canvas/hit-test-placement layout pt))
-            (swap! ui-atom assoc :selected-element (canvas/hit-test-placement layout pt)
+            (some? (canvas/hit-test-placement layout (.-dx pt) (.-dy pt)))
+            (swap! ui-atom assoc :selected-element (canvas/hit-test-placement layout (.-dx pt) (.-dy pt))
                                   :selected-connection nil)
 
-            (some? (canvas/hit-test-edge (:edges render-model) pt 6.0))
-            (swap! ui-atom assoc :selected-connection (canvas/hit-test-edge (:edges render-model) pt 6.0)
+            (some? (canvas/hit-test-edge (:edges render-model) (.-dx pt) (.-dy pt) 6.0))
+            (swap! ui-atom assoc :selected-connection (canvas/hit-test-edge (:edges render-model) (.-dx pt) (.-dy pt) 6.0)
                                   :selected-element nil)
 
-            (some? (canvas/hit-test-slice-header layout pt))
+            (some? (canvas/hit-test-slice-header layout (.-dx pt) (.-dy pt)))
             (swap! ui-atom update :expanded-slices
-                   (fn [s] (if (contains? s (canvas/hit-test-slice-header layout pt))
-                             (disj s (canvas/hit-test-slice-header layout pt))
-                             (conj s (canvas/hit-test-slice-header layout pt)))))))
+                   (fn [s] (if (contains? s (canvas/hit-test-slice-header layout (.-dx pt) (.-dy pt)))
+                             (disj s (canvas/hit-test-slice-header layout (.-dx pt) (.-dy pt)))
+                             (conj s (canvas/hit-test-slice-header layout (.-dx pt) (.-dy pt))))))))
         nil)
       .child
       (m/MouseRegion
         .onHover
         (fn [^g/PointerHoverEvent e]
-          (let [eid (canvas/hit-test-placement (:layout render-model) (adjust-pt (.-localPosition e)))]
+          (let [pt  (adjust-pt (.-localPosition e))
+                eid (canvas/hit-test-placement (:layout render-model) (.-dx pt) (.-dy pt))]
             (swap! ui-atom assoc :hovered-element eid))
           nil)
         .onExit (fn [_] (swap! ui-atom assoc :hovered-element nil) nil)
@@ -366,7 +375,9 @@
          :empty (m/Center .child (m/Text "No timelines yet"))
          :rendered (canvas-body st ui store-atom ui-atom last-scale transform-controller)
          :error (canvas-body st ui store-atom ui-atom last-scale transform-controller)
-         ;; nil (no snapshot yet) and :loading both show the spinner
+         ;; only a missing :visualization (no snapshot yet) reaches the
+         ;; spinner; no store state ever holds :loading (see
+         ;; store.cljd's render-loading-transition)
          (m/Center .child (m/CircularProgressIndicator)))
 
        (when (= (get-in st [:visualization :state]) :error)

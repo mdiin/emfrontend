@@ -42,6 +42,13 @@
   [m/Colors.grey.shade50
    m/Colors.grey.shade100])
 
+(defn band-shade
+  "The fill colour for the swimlane band at rendered `band-index`; the two
+   shades alternate so adjacent bands of a table always differ (rule
+   AlternatingBandShading)."
+  [band-index]
+  (nth swimlane-band-shades (mod band-index 2)))
+
 (def ^:private arrowhead-size 14.0)
 
 (def timeline-title-base-font-size 48.0)
@@ -338,7 +345,7 @@
         (.translate canvas 0.0 title-h)
         (doseq [[band-index {:keys [rect swimlane-id]}] (map-indexed vector (:swimlane-bands layout))]
           (.drawRect canvas (rect->m rect)
-                     (fill-paint (nth swimlane-band-shades (mod band-index 2))))
+                     (fill-paint (band-shade band-index)))
           (when-some [sw (get swimlanes swimlane-id)]
             (draw-text canvas (or (:name sw) "") 4.0 (+ (:y rect) 8.0)
                        (m/TextStyle .fontSize 11.0 .fontWeight m/FontWeight.w500 .color m/Colors.black)
@@ -390,26 +397,24 @@
 ;; == Hit-testing (element/connection tap-to-select) ===========================
 
 (defn hit-test-placement
-  "The element-id of the placement card at `point` (widget-local
-   coordinates), or nil."
-  [layout ^m/Offset point]
-  (let [x (.-dx point) y (.-dy point)]
-    (some (fn [{:keys [element-id rect]}]
-            (when (and (<= (:x rect) x (+ (:x rect) (:width rect)))
-                       (<= (:y rect) y (+ (:y rect) (:height rect))))
-              element-id))
-          (:placements layout))))
+  "The element-id of the placement card at (x, y) in widget-local
+   coordinates, or nil."
+  [layout x y]
+  (some (fn [{:keys [element-id rect]}]
+          (when (and (<= (:x rect) x (+ (:x rect) (:width rect)))
+                     (<= (:y rect) y (+ (:y rect) (:height rect))))
+            element-id))
+        (:placements layout)))
 
 (defn hit-test-slice-header
-  "The slice-id of the column header at `point`, or nil -- opens
-   SpecificationExpanded for that slice."
-  [layout ^m/Offset point]
-  (let [x (.-dx point) y (.-dy point)]
-    (some (fn [{:keys [slice-id rect]}]
-            (when (and (<= (:x rect) x (+ (:x rect) (:width rect)))
-                       (<= (:y rect) y (+ (:y rect) (:height rect))))
-              slice-id))
-          (:slice-headers layout))))
+  "The slice-id of the column header at (x, y) in widget-local coordinates,
+   or nil -- opens SpecificationExpanded for that slice."
+  [layout x y]
+  (some (fn [{:keys [slice-id rect]}]
+          (when (and (<= (:x rect) x (+ (:x rect) (:width rect)))
+                     (<= (:y rect) y (+ (:y rect) (:height rect))))
+            slice-id))
+        (:slice-headers layout)))
 
 (defn- point-bezier-distance
   "Minimum distance from (px, py) to the cubic Bezier with endpoints (fx, fy)
@@ -428,18 +433,17 @@
 
 (defn hit-test-edge
   "The connection-id of the edge curve passing within `threshold` px of
-   `point`, or nil."
-  [edges ^m/Offset point threshold]
-  (let [x (.-dx point) y (.-dy point)]
-    (some (fn [{:keys [connection-id from-rect to-rect x-nudge]}]
-            (let [[fx fy tx ty] (edge-endpoints from-rect to-rect)
-                  fx   (+ fx x-nudge) tx (+ tx x-nudge)
-                  dy   (abs (- ty fy))
-                  tension (max 40.0 (min 200.0 (* dy 0.5)))
-                  descending? (<= fy ty)
-                  cp1y (if descending? (+ fy tension) (- fy tension))
-                  cp2y (if descending? (- ty tension) (+ ty tension))]
-              (when (<= (point-bezier-distance x y fx fy cp1y cp2y tx ty 20)
-                        threshold)
-                connection-id)))
-          edges)))
+   (x, y) in widget-local coordinates, or nil."
+  [edges x y threshold]
+  (some (fn [{:keys [connection-id from-rect to-rect x-nudge]}]
+          (let [[fx fy tx ty] (edge-endpoints from-rect to-rect)
+                fx   (+ fx x-nudge) tx (+ tx x-nudge)
+                dy   (abs (- ty fy))
+                tension (max 40.0 (min 200.0 (* dy 0.5)))
+                descending? (<= fy ty)
+                cp1y (if descending? (+ fy tension) (- fy tension))
+                cp2y (if descending? (- ty tension) (+ ty tension))]
+            (when (<= (point-bezier-distance x y fx fy cp1y cp2y tx ty 20)
+                      threshold)
+              connection-id)))
+        edges))

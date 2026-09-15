@@ -132,3 +132,62 @@
 (deftest wf-leaf-label-nil-tag-test
   (testing "a node with no tag (e.g. a bare string child) yields nil, not a crash"
     (is (nil? (canvas/wf-leaf-label nil {})))))
+
+;; == band-shade ==============================================================
+
+(deftest band-shade-alternates-test
+  (testing "rule AlternatingBandShading: adjacent band indices get different
+            shades, and every other index repeats the same shade"
+    (is (not= (canvas/band-shade 0) (canvas/band-shade 1)))
+    (is (= (canvas/band-shade 0) (canvas/band-shade 2)))
+    (is (= (canvas/band-shade 1) (canvas/band-shade 3)))))
+
+;; == hit-test-placement ======================================================
+
+;; Layout maps are hand-built in the shape build-timeline-render-model produces:
+;; placements carry :element-id and a :rect, slice headers carry :slice-id and
+;; a :rect. All coordinates are widget-local.
+(def ^:private sample-layout
+  {:placements [{:element-id :e1 :rect {:x 10.0 :y 20.0 :width 100.0 :height 50.0}}
+                {:element-id :e2 :rect {:x 200.0 :y 20.0 :width 100.0 :height 50.0}}]
+   :slice-headers [{:slice-id :s1 :rect {:x 0.0 :y 0.0 :width 200.0 :height 56.0}}]})
+
+(deftest hit-test-placement-inside-test
+  (testing "a point inside a placement's rect returns its element-id"
+    (is (= :e1 (canvas/hit-test-placement sample-layout 50.0 40.0)))
+    (is (= :e2 (canvas/hit-test-placement sample-layout 250.0 40.0)))))
+
+(deftest hit-test-placement-miss-test
+  (testing "a point outside every rect returns nil"
+    (is (nil? (canvas/hit-test-placement sample-layout 5.0 40.0)))
+    (is (nil? (canvas/hit-test-placement sample-layout 50.0 500.0)))))
+
+(deftest hit-test-placement-inclusive-edges-test
+  (testing "the rect bounds are inclusive (<= against x+width / y+height), so
+            the right and bottom edges still hit, one pixel past does not"
+    (is (= :e1 (canvas/hit-test-placement sample-layout 110.0 40.0)) "right edge")
+    (is (= :e1 (canvas/hit-test-placement sample-layout 50.0 70.0)) "bottom edge")
+    (is (nil? (canvas/hit-test-placement sample-layout 110.5 40.0)))
+    (is (nil? (canvas/hit-test-placement sample-layout 50.0 70.5)))))
+
+;; == hit-test-slice-header ===================================================
+
+(deftest hit-test-slice-header-test
+  (testing "a point inside a header rect returns the slice-id, a miss returns nil"
+    (is (= :s1 (canvas/hit-test-slice-header sample-layout 100.0 20.0)))
+    (is (nil? (canvas/hit-test-slice-header sample-layout 100.0 100.0)))))
+
+;; == hit-test-edge ===========================================================
+
+(deftest hit-test-edge-test
+  (testing "a point on the curve within the threshold returns the connection-id;
+            a far-away point returns nil"
+    (let [from-rect (rect 0 0)
+          to-rect   (rect 1 1)
+          [fx fy]   (canvas/edge-endpoints from-rect to-rect)
+          edges     [{:connection-id :c1 :from-rect from-rect :to-rect to-rect
+                      :x-nudge 0.0}]]
+      (is (= :c1 (canvas/hit-test-edge edges fx fy 1.0))
+          "the from-anchor sits exactly on the curve")
+      (is (= :c1 (canvas/hit-test-edge edges (+ fx 2.0) fy 6.0)))
+      (is (nil? (canvas/hit-test-edge edges (+ fx 1000.0) fy 6.0))))))
