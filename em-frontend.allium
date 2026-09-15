@@ -150,10 +150,13 @@ entity Timeline {
 }
 
 -- A row of the timeline table. Elements assigned to it appear in its row;
--- the row carries a label on the left margin.
+-- the row carries a label on the left margin. Band rows are ordered by
+-- `index`, smallest first; row 0 is the default unnamed band for elements
+-- with no swimlane assignment, so named swimlanes occupy the rows after it.
 entity Swimlane {
   model: EventModel
   name: String
+  index: Integer
 
   members: Element with swimlane = this
 }
