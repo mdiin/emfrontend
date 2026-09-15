@@ -430,6 +430,21 @@ rule RetryRestartsConnection {
   ensures: connection.state = connecting
 }
 
+-- The viewer's manual reload: a fresh connection is forced from a healthy
+-- stream, so a new full snapshot is fetched even though nothing has failed.
+-- The following snapshot reseeds the store through the existing
+-- SnapshotReceived path (ReconnectPreservesViewport), which is why the view
+-- state is deliberately left unchanged here: reload refreshes the model, not
+-- the view. Because the reload only fires from `connected`, and the reloaded
+-- connection leaves that state, this `requires` is also the single-in-flight
+-- guard: while the fresh attempt is starting a second reload cannot fire.
+rule ReloadRestartsConnection {
+  when: ReloadModel(viewer, viz)
+  let connection = SSEConnection
+  requires: connection.state = connected
+  ensures: connection.state = reconnecting
+}
+
 -- == Delta application: animation, layout and re-render =====================
 
 -- A newly created element animates in.
@@ -1112,6 +1127,10 @@ surface Viewport {
     -- Fits and centres the entire model in the viewport; clears any timeline
     -- filter first, so the fit is over the whole model rather than the subset.
     SnapToContent(viewer, viz)
+    -- Forces a fresh connection, and therefore a fresh full snapshot; always
+    -- available, filtered view or not, and the current view state (zoom, pan,
+    -- filter and field-flow highlight) is preserved across the reseed.
+    ReloadModel(viewer, viz)
 }
 
 -- The rendered canvas: the read-only row/column/band layout. Exposes the

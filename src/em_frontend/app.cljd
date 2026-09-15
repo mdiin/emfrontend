@@ -99,11 +99,20 @@
 (defn- start-stream!
   "Starts the SSE driver, wiring stream/connect!'s four callbacks onto
    store-atom/ui-atom through apply-outcome!. Hoisted out of `root` so the
-   same wiring can be invoked again for a manual retry: connect! builds its
-   own http Client and Completer per call, so a second call is an independent
-   driver, not a resumption of the failed one."
-  [store-atom ui-atom]
-  (stream/connect! stream-url
+   same wiring can be invoked again for a manual retry or reload: connect!
+   builds its own http Client and Completer per call, so a second call is an
+   independent driver, not a resumption of the failed one. Returns that
+   driver's handle, so a caller can retire it (stream/disconnect!) before
+   starting the next one -- two live drivers would both write the atoms.
+
+   `initial-state` is the state the fresh driver announces for its first
+   attempt, and every caller passes the very state its rule ensures --
+   :connecting for the cold start and for a retry (RetryRestartsConnection),
+   :reconnecting for a reload (ReloadRestartsConnection) -- so the driver
+   never writes an undeclared SSEConnection edge such as
+   `reconnecting -> connecting`."
+  [store-atom ui-atom initial-state]
+  (stream/connect! stream-url initial-state
     (fn [s] (apply-outcome! store-atom ui-atom (store/set-sse-state @store-atom s)))
     (fn [seed] (apply-outcome! store-atom ui-atom (store/snapshot-received @store-atom seed)))
     (fn [changes] (apply-outcome! store-atom ui-atom (store/ingest-delta @store-atom changes)))
@@ -111,14 +120,46 @@
 
 (defn- retry-stream!
   "rule RetryRestartsConnection, driven by the error banner's Retry button:
-   apply the pure retry action, then start the stream again -- but only when
-   the connection really was :error. The retry moves it straight to
-   :connecting, so a second invocation (or a double click) sees :connecting
-   and starts nothing: at most one connection attempt is ever in flight."
-  [store-atom ui-atom]
+   retire the current driver, apply the pure retry action, then start the
+   stream again -- but only when the connection really was :error. The retry
+   moves it straight to :connecting, so a second invocation (or a double
+   click) sees :connecting and starts nothing: at most one connection attempt
+   is ever in flight.
+
+   The handle is threaded in and recorded exactly as in `reload-model!`, so
+   `stream-handle` always names the live driver. Retiring first is a no-op on
+   the driver that just ended on :error (`disconnect!` is nil-safe and
+   idempotent), but it is what stops a still-live driver from being orphaned:
+   without it, a retry followed by a reload would cancel the DEAD handle and
+   leave this fresh one delivering snapshots and deltas into the same atoms
+   alongside the reload's replacement (double reseed, every delta applied
+   twice)."
+  [store-atom ui-atom stream-handle]
   (when (= :error (get-in @store-atom [:sse-connection :state]))
+    (stream/disconnect! @stream-handle)
     (apply-outcome! store-atom ui-atom (store/retry-stream @store-atom))
-    (start-stream! store-atom ui-atom)))
+    (reset! stream-handle (start-stream! store-atom ui-atom :connecting))))
+
+(defn- reload-model!
+  "rule ReloadRestartsConnection, driven by the app bar's Reload model
+   button: retire the live driver (so only one ever writes the atoms), apply
+   the pure reload action, then start a fresh driver whose full snapshot
+   reseeds the store through the existing SnapshotReceived path
+   (ReconnectPreservesViewport). No view state is touched anywhere here --
+   reload refreshes the model, not the view. The pure rule's :connected
+   guard is also the single-in-flight guard: the reload moves the connection
+   to :reconnecting, so a second invocation (or a double click) sees that
+   and neither cancels nor starts anything.
+
+   The fresh driver announces :reconnecting for its first attempt -- the
+   very state the rule ensures -- so the reload's observable sequence is
+   `connected -> reconnecting -> connected` and no undeclared
+   `reconnecting -> connecting` edge is ever written."
+  [store-atom ui-atom stream-handle]
+  (when (= :connected (get-in @store-atom [:sse-connection :state]))
+    (stream/disconnect! @stream-handle)
+    (apply-outcome! store-atom ui-atom (store/reload-model @store-atom))
+    (reset! stream-handle (start-stream! store-atom ui-atom :reconnecting))))
 
 ;; == Canvas: per-timeline hit-testing + the whole-canvas InteractiveViewer ===
 
@@ -317,7 +358,7 @@
                       [(m/Text "Received invalid data from the stream -- ignored.")
                        (m/IconButton .icon (m/Icon m/Icons.close) .onPressed on-close)]))))
 
-(defn- overlay-stack [st ui store-atom ui-atom last-scale transform-controller]
+(defn- overlay-stack [st ui store-atom ui-atom last-scale transform-controller stream-handle]
   (m/Stack
     .children
     (filterv some?
@@ -331,7 +372,9 @@
        (when (= (get-in st [:visualization :state]) :error)
          (m/Align .alignment m/Alignment.topCenter
            .child (error-banner
-                    {:on-retry (fn [] (retry-stream! store-atom ui-atom))})))
+                    ;; the retry starts a replacement driver, so it needs the
+                    ;; same handle thread the app bar's reload already has
+                    {:on-retry (fn [] (retry-stream! store-atom ui-atom stream-handle))})))
 
        (when (:invalid-data ui)
          (m/Align .alignment m/Alignment.bottomLeft
@@ -392,14 +435,21 @@
 
 ;; == Root ======================================================================
 
-(defn- app-bar [st store-atom ui-atom transform-controller]
+(defn- app-bar [st store-atom ui-atom transform-controller stream-handle]
   (m/AppBar
     .title (m/Text (or (get-in st [:event-model :name]) "Event Model Visualization"))
     .actions
     [(m/IconButton
        .icon (m/Icon m/Icons.fit_screen)
        .tooltip "Snap to content"
-       .onPressed (fn [] (snap-to-content! store-atom ui-atom transform-controller) nil))]
+       .onPressed (fn [] (snap-to-content! store-atom ui-atom transform-controller) nil))
+     ;; rule ReloadRestartsConnection: force a fresh stream from a healthy one
+     ;; so a new full snapshot reseeds the store; zoom/pan/filter/highlight are
+     ;; deliberately left alone (reload refreshes the model, not the view).
+     (m/IconButton
+       .icon (m/Icon m/Icons.refresh)
+       .tooltip "Reload model"
+       .onPressed (fn [] (reload-model! store-atom ui-atom stream-handle) nil))]
     .bottom
     (m/PreferredSize
       .preferredSize (m/Size.fromHeight 40.0)
@@ -463,14 +513,19 @@
                                   .duration (Duration .milliseconds config/animation-duration-ms))
                             (.addListener (fn [] (swap! ui-atom step-element-alphas)))
                             (.repeat))]
-    :managed [_ (start-stream! store-atom ui-atom)
+    ;; the live SSE driver's handle (see start-stream!/retry-stream!/
+    ;; reload-model!): EVERY place that starts a driver records its handle
+    ;; here (cold start, retry, reload), so this atom always names the live
+    ;; one and a restart can retire it before starting its replacement
+    :managed [stream-handle (atom nil) :dispose nil]
+    :managed [_ (reset! stream-handle (start-stream! store-atom ui-atom :connecting))
               :dispose nil]
     :watch [st store-atom]
     :watch [ui ui-atom]
     (m/MaterialApp .title "Event Model Visualization" .debugShowCheckedModeBanner false)
     .home
     (m/Scaffold
-      .appBar (app-bar st store-atom ui-atom transform-controller)
-      .body (overlay-stack st ui store-atom ui-atom last-scale transform-controller))))
+      .appBar (app-bar st store-atom ui-atom transform-controller stream-handle)
+      .body (overlay-stack st ui store-atom ui-atom last-scale transform-controller stream-handle))))
 
 (defn main [] (f/run (root)))

@@ -122,6 +122,21 @@
     {:store (assoc-in store [:sse-connection :state] :connecting) :effects []}
     {:store store :effects []}))
 
+(defn reload-model
+  "rule ReloadRestartsConnection: the viewer's manual reload of a healthy
+   stream. Forcing a fresh connection from `connected` fetches a new full
+   snapshot even though nothing has failed; the following snapshot reseeds
+   the store through `snapshot-received` (ReconnectPreservesViewport), which
+   is why the Visualization is deliberately left untouched here -- reload
+   refreshes the model, not the view. Guarded on `connected`, so a reload
+   that arrives while an attempt is starting, while reconnecting, or after a
+   failure is a no-op (the failed case is RetryRestartConnection's to move):
+   at most one connection attempt in flight."
+  [store]
+  (if (= :connected (get-in store [:sse-connection :state]))
+    {:store (assoc-in store [:sse-connection :state] :reconnecting) :effects []}
+    {:store store :effects []}))
+
 ;; == Element deltas ==========================================================
 
 (defn- incomplete-marking-effect

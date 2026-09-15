@@ -263,63 +263,137 @@
 (defn- ^double backoff-ms [attempt]
   (.toDouble (min max-backoff-ms (* initial-backoff-ms (math/pow 2 attempt)))))
 
-(defn ^:async connect!
-  "Opens `stream-url` and drives it forever, reconnecting with exponential
-   backoff on drop, per SSEConnection's transitions state {} block. Calls:
+(defn- ^:async drive-stream!
+  "The connection + backoff loop behind `connect!`, run in the background.
+   Reconnects with exponential backoff on drop, per SSEConnection's
+   transitions state {} block; only settles once the state reaches :error --
+   reachable only after max-attempts CONSECUTIVE failed connection attempts
+   (a successful :connected resets the count), never merely cumulative over
+   the process's lifetime.
+
+   `initial-state` is what attempt 0 announces -- :connecting for a cold
+   start or a retry (RetryRestartsConnection ensures `connecting`),
+   :reconnecting for a reload (ReloadRestartsConnection ensures
+   `reconnecting`) -- so each caller's driver announces exactly the state its
+   rule ensures; every later attempt is a backoff retry, hence :reconnecting.
+
+   `stopped` is the cancellation flag, and `live!` publishes the current
+   {:client :done :subscription} (nil between attempts) so that
+   `disconnect!` can retire this very driver from outside the loop. Every
+   await is followed by a `stopped` check, so a cancelled driver neither
+   retries nor starts listening on a connection that came up too late."
+  [stream-url initial-state on-sse-state on-snapshot on-delta on-invalid stopped live!]
+  (loop [attempt 0]
+    (when-not @stopped
+      (on-sse-state (if (zero? attempt) initial-state :reconnecting))
+      (let [connected? (atom false)]
+        (when-not @stopped
+          (try
+            (let [client (http/Client)
+                  _ (reset! live! {:client client})
+                  request (http/Request "GET" (Uri/parse stream-url))
+                  ^http/StreamedResponse response (await (.send client request))]
+              (if @stopped
+                ;; cancelled while the response was in flight: retire this
+                ;; client, never listen -- the loop exits on the check below
+                (do (.close client) nil)
+                (let [lines (-> (.-stream response)
+                                (.transform (.-decoder convert/utf8))
+                                (.transform (convert/LineSplitter)))
+                      payloads (sse-payloads lines)
+                      first? (atom true)
+                      done (async/Completer)
+                      on-payload (fn [^String raw]
+                                   (try
+                                     (if @first?
+                                       (do (reset! first? false) (on-snapshot (normalize-snapshot raw)))
+                                       (if-some [changes (normalize-changes raw)]
+                                         (on-delta changes)
+                                         (on-invalid raw)))
+                                     (catch Object _
+                                       ;; A snapshot/delta that throws mid-parse
+                                       ;; (rather than just failing to
+                                       ;; normalize) must still complete `done`,
+                                       ;; or the reconnect loop below stalls
+                                       ;; forever awaiting it.
+                                       (on-invalid raw)
+                                       (.complete done nil))))]
+                  (swap! live! assoc :done done)
+                  (on-sse-state :connected)
+                  (reset! connected? true)
+                  (swap! live! assoc :subscription
+                         (.listen payloads on-payload
+                           .onDone (fn [] (.complete done nil))
+                           .onError (fn [e] (.complete done nil))))
+                  (await (.-future done))
+                  (reset! live! nil))))
+            (catch Object _ nil)))
+        (if @stopped
+          nil
+          ;; A dropped connection always retries; `error` is reached only once
+          ;; max-attempts CONSECUTIVE attempts have failed, so any connection
+          ;; that got as far as :connected resets the count back to 0.
+          (let [base-attempt (if @connected? 0 attempt)
+                next-attempt (inc base-attempt)]
+            (if (>= next-attempt max-attempts)
+              (on-sse-state :error)
+              (do
+                (await (Future/delayed (Duration .milliseconds (.round (backoff-ms base-attempt)))))
+                (recur next-attempt)))))))))
+
+(defn connect!
+  "Opens `stream-url`, drives it in the background and returns that driver's
+   handle: a map with a :cancel fn (wrapped by `disconnect!`). Calls:
      (on-sse-state kw)      every SSEConnection state change
      (on-snapshot seed)     the first payload of every (re)connection
      (on-delta changes)     every subsequent delta, as a vector of
                             {:entity :change :data} changes to apply atomically
      (on-invalid raw)       a payload that failed to parse/validate
-   Never returns under normal operation; only settles once the state
-   reaches :error -- reachable only after max-attempts CONSECUTIVE failed
-   connection attempts (a successful :connected resets the count), never
-   merely cumulative over the process's lifetime. :error is terminal only
-   until the viewer retries: a retry is a fresh call to connect!, which
-   builds its own http Client and Completer and starts again from
-   :connecting (rule RetryRestartsConnection, the `error -> connecting`
-   edge of SSEConnection's transitions state {} block)."
-  [stream-url on-sse-state on-snapshot on-delta on-invalid]
-  (loop [attempt 0]
-    (on-sse-state (if (zero? attempt) :connecting :reconnecting))
-    (let [connected? (atom false)]
-      (try
-        (let [client (http/Client)
-              request (http/Request "GET" (Uri/parse stream-url))
-              ^http/StreamedResponse response (await (.send client request))
-              lines (-> (.-stream response)
-                        (.transform (.-decoder convert/utf8))
-                        (.transform (convert/LineSplitter)))
-              payloads (sse-payloads lines)
-              first? (atom true)
-              done (async/Completer)]
-          (on-sse-state :connected)
-          (reset! connected? true)
-          (.listen payloads
-            (fn [^String raw]
-              (try
-                (if @first?
-                  (do (reset! first? false) (on-snapshot (normalize-snapshot raw)))
-                  (if-some [changes (normalize-changes raw)]
-                    (on-delta changes)
-                    (on-invalid raw)))
-                (catch Object _
-                  ;; A snapshot/delta that throws mid-parse (rather than
-                  ;; just failing to normalize) must still complete `done`,
-                  ;; or the reconnect loop below stalls forever awaiting it.
-                  (on-invalid raw)
-                  (.complete done nil))))
-            .onDone (fn [] (.complete done nil))
-            .onError (fn [e] (.complete done nil)))
-          (await (.-future done)))
-        (catch Object _ nil))
-      ;; A dropped connection always retries; `error` is reached only once
-      ;; max-attempts CONSECUTIVE attempts have failed, so any connection
-      ;; that got as far as :connected resets the count back to 0.
-      (let [base-attempt (if @connected? 0 attempt)
-            next-attempt (inc base-attempt)]
-        (if (>= next-attempt max-attempts)
-          (on-sse-state :error)
-          (do
-            (await (Future/delayed (Duration .milliseconds (.round (backoff-ms base-attempt)))))
-            (recur next-attempt)))))))
+
+   Driving never blocks the caller and only settles once the state reaches
+   :error -- reachable only after max-attempts CONSECUTIVE failed connection
+   attempts. :error is terminal only until the viewer retries: a retry is a
+   fresh call to connect!, which builds its own http Client and Completer and
+   starts again from :connecting (rule RetryRestartsConnection, the
+   `error -> connecting` edge of SSEConnection's transitions state {} block).
+   A reload is the same fresh call, made while healthy (rule
+   ReloadRestartsConnection) -- hence the handle: two live drivers would both
+   write the same atoms, so a caller retires the old one (`disconnect!`)
+   before starting the next.
+
+   `initial-state` is the state this driver announces for its FIRST attempt
+   (attempt 0), supplied by the caller because each caller implements a
+   different rule: :connecting for a cold start or a retry,
+   :reconnecting for a reload. Later attempts are backoff retries and always
+   announce :reconnecting, so `reconnecting -> connecting` -- an edge
+   SSEConnection's transition graph does NOT declare -- is never written."
+  [stream-url initial-state on-sse-state on-snapshot on-delta on-invalid]
+  (let [stopped (atom false)
+        live! (atom nil)
+        cancel! (fn []
+                  ;; `stopped` first: it makes this whole fn idempotent, and
+                  ;; stops the loop from retrying whatever happens next.
+                  (when-not @stopped
+                    (reset! stopped true)
+                    (when-some [live @live!]
+                      (reset! live! nil)
+                      (let [^async/StreamSubscription subscription (:subscription live)
+                            ^async/Completer done (:done live)
+                            ^http/Client client (:client live)]
+                        ;; stop delivery first, then release the loop's await,
+                        ;; then drop the transport
+                        (when (some? subscription) (.cancel subscription))
+                        (when (some? done) (.complete done nil))
+                        (when (some? client) (.close client))
+                        nil))))]
+    (drive-stream! stream-url initial-state on-sse-state on-snapshot on-delta on-invalid stopped live!)
+    {:cancel cancel!}))
+
+(defn disconnect!
+  "Retires a driver handle returned by `connect!`: its subscription stops
+   delivering, its reconnect/backoff loop stops retrying and its http Client
+   is closed. Idempotent, and safe on a handle whose driver already ended
+   (e.g. on :error), so callers need not track whether it is still live."
+  [handle]
+  (when (some? handle)
+    ((:cancel handle))))

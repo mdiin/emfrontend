@@ -116,6 +116,50 @@
           {:keys [store]} (store/snapshot-received store snapshot-with-timeline)]
       (is (= :rendered (get-in store [:visualization :state]))))))
 
+(deftest reload-restarts-connection-test
+  (testing "rule ReloadRestartsConnection: reloading a healthy stream moves the
+            connection to :reconnecting so a fresh snapshot is forced, and
+            deliberately leaves the view state alone -- reload refreshes the
+            model, not the view"
+    (let [store (assoc-in (store-with-snapshot) [:sse-connection :state] :connected)
+          {:keys [store effects]} (store/reload-model store)]
+      (is (= :reconnecting (get-in store [:sse-connection :state])))
+      (is (= :rendered (get-in store [:visualization :state]))
+          "the Visualization is untouched; the fresh snapshot is what reseeds it")
+      (is (= [] effects) "no effects: the reload is a pure state move")))
+  (testing "transition_edge connected -> reconnecting: the reload is the
+            witnessing rule for the edge the SSEConnection graph declares, and
+            it lands the connection exactly in that target state"
+    (let [store (assoc-in (store-with-snapshot) [:sse-connection :state] :connected)
+          {:keys [store]} (store/reload-model store)]
+      (is (= :reconnecting (get-in store [:sse-connection :state])))))
+  (testing "the requires guard is the single-in-flight guard (rule_failure): a
+            reload that arrives when the connection is not :connected -- a
+            failed stream (where the retry is the way out), an attempt just
+            starting, or one already reconnecting -- changes nothing"
+    (doseq [state [:error :connecting :reconnecting]]
+      (let [store (assoc-in (store-with-snapshot) [:sse-connection :state] state)
+            {:keys [store effects]} (store/reload-model store)]
+        (is (= state (get-in store [:sse-connection :state]))
+            (str "state " state " is left unchanged"))
+        (is (= [] effects)))))
+  (testing "the boundary between the two sibling rules: from :error a reload is
+            rejected and the connection stays put for RetryStream to move --
+            connected -> reconnecting is not-applicable there"
+    (let [errored (assoc-in (store-with-snapshot) [:sse-connection :state] :error)
+          {:keys [store effects]} (store/reload-model errored)]
+      (is (= :error (get-in store [:sse-connection :state]))
+          "reload's requires is :connected, so :error is left to the retry path")
+      (is (= [] effects))))
+  (testing "the reload-then-reseed path is real: the fresh snapshot that follows
+            reseeds the store through the existing SnapshotReceived path, the
+            preserved Visualization going rendered -> loading -> rendered"
+    (let [store (assoc-in (store-with-snapshot) [:sse-connection :state] :connected)
+          {store :store} (store/reload-model store)
+          {:keys [store]} (store/snapshot-received store snapshot-empty)]
+      (is (= :empty (get-in store [:visualization :state]))
+          "the reseed re-evaluates loading -> empty, exactly as ReconnectPreservesViewport does"))))
+
 ;; == Element deltas ============================================================
 
 (deftest element-creation-animates-test
