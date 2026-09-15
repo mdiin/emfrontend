@@ -36,6 +36,12 @@
    :screen m/Colors.purple
    :automation m/Colors.blueGrey})
 
+;; Swimlane band striping: two shades picked by the band's rendered row
+;; position (index parity), so adjacent bands of a table always differ.
+(def swimlane-band-shades
+  [m/Colors.grey.shade50
+   m/Colors.grey.shade100])
+
 (def ^:private arrowhead-size 14.0)
 
 (def timeline-title-base-font-size 48.0)
@@ -326,8 +332,9 @@
           (.paint tp canvas (m/Offset title-x title-y)))
         (.save canvas)
         (.translate canvas 0.0 title-h)
-        (doseq [{:keys [rect swimlane-id]} (:swimlane-bands layout)]
-          (.drawRect canvas (rect->m rect) (fill-paint m/Colors.grey.shade50))
+        (doseq [[band-index {:keys [rect swimlane-id]}] (map-indexed vector (:swimlane-bands layout))]
+          (.drawRect canvas (rect->m rect)
+                     (fill-paint (nth swimlane-band-shades (mod band-index 2))))
           (when-some [sw (get swimlanes swimlane-id)]
             (draw-text canvas (or (:name sw) "") 4.0 (+ (:y rect) 8.0)
                        (m/TextStyle .fontSize 11.0 .fontWeight m/FontWeight.w500 .color m/Colors.black)

@@ -150,7 +150,7 @@ entity Timeline {
 }
 
 -- A row of the timeline table. Elements assigned to it appear in its row;
--- the row carries a background colour and a label on the left margin.
+-- the row carries a label on the left margin.
 entity Swimlane {
   model: EventModel
   name: String
@@ -587,7 +587,7 @@ rule TimelineChangeRelaysOut {
   ensures: CanvasRelaidOut
 }
 
--- A swimlane change (created, renamed, recoloured, deleted) affects band
+-- A swimlane change (created, renamed, reordered, deleted) affects band
 -- row labels across all timeline tables; the whole canvas is relaid out.
 rule SwimlaneChangeRelaysOut {
   when: SwimlaneChanged(_, _)
@@ -971,7 +971,7 @@ surface StreamIngest {
     ConnectionDerivationsUpdated(source, connection)
     -- A timeline was created, renamed, or deleted.
     TimelineChanged(source, timeline)
-    -- A swimlane was created, renamed, recoloured, or deleted.
+    -- A swimlane was created, renamed, reordered, or deleted.
     SwimlaneChanged(source, swimlane)
     -- A slice was created, reordered, restatused, rekinded or deleted.
     SliceChanged(source, slice)
@@ -1019,14 +1019,18 @@ surface Viewport {
 -- per-slice styling fields (kind drives column treatment, status drives shading),
 -- the swimlane bands with their labels, and the placements within each slice —
 -- one card per placement, so an element placed more than once (in this slice
--- or another) appears that many times rather than being collapsed to one.
+-- or another) appears that many times rather than being collapsed to one. A band
+-- is exposed only for a swimlane holding at least one placement in this timeline;
+-- the default unnamed band row (an element with no swimlane assignment — the
+-- Element.swimlane = nil case) appears where a placed element in this timeline
+-- has no swimlane.
 surface Canvas {
   facing viewer: Viewer
   context timeline: Timeline
 
   exposes:
     timeline.title
-    for band in timeline.model.swimlanes:
+    for band in timeline.model.swimlanes where band.members.any(e => e.placements.any(p => p.slice.timeline = timeline)):
       band.name
     for slice in timeline.slices:
       slice.title
@@ -1040,4 +1044,8 @@ surface Canvas {
         for f in placement.element.canvas_fields:
           f.name
           f.type
+
+  @guarantee AlternatingBandShading
+    -- Adjacent rows of a timeline table are visually distinguished by
+    -- alternating band shading.
 }
