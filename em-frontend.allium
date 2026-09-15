@@ -1016,7 +1016,7 @@ surface Viewport {
 }
 
 -- The rendered canvas: the read-only row/column/band layout. Exposes the
--- per-slice styling fields (kind drives column treatment, status drives shading),
+-- per-slice styling fields (status drives shading),
 -- the swimlane bands with their labels, and the placements within each slice —
 -- one card per placement, so an element placed more than once (in this slice
 -- or another) appears that many times rather than being collapsed to one. A band
@@ -1034,7 +1034,6 @@ surface Canvas {
       band.name
     for slice in timeline.slices:
       slice.title
-      slice.kind
       slice.status
       slice.index
       for placement in slice.placements:
