@@ -215,6 +215,10 @@ entity Element {
   outgoing: Connection with from = this
   incoming: Connection with to = this
 
+  -- Names of this element's fields. The wireframe's field-name overlay is
+  -- tinted against these: see WireframeFieldOverlaysTint.
+  field_names: fields -> name
+
   -- Names of fields that are neither introduced here (no FieldOrigin) nor
   -- carried/derived by an incoming connection. These are the unsourced fields
   -- the incomplete tooltip lists.
@@ -772,6 +776,43 @@ rule FieldFlowHighlights {
       ConnectionHighlighted(connection: c)
     for c in model.connections where c not in on_path:
       ConnectionDimmed(connection: c)
+}
+
+-- == Wireframe overlays =====================================================
+
+-- A screen's card is given over to its wireframe, which paints semi-transparent
+-- overlays over the nodes carrying them. The wireframe's NODE TREE is
+-- deliberately not modelled: its tags, per-tag heights, column/row child layout
+-- and node identities are renderer geometry, left to the renderer in the same
+-- spirit as the layout geometry and content-extent measurement disclaimed
+-- above. Allium has no map type for a node's arbitrary attribute map and no
+-- recursive derived value with which to walk a tree (recursion is expressible
+-- in types only -- Field.subfields is the precedent), and the nodes' `-id`
+-- attributes are pure wire normalisation. None of that carries behaviour.
+--
+-- What does carry behaviour is the field-name overlay: a node may carry a
+-- `field-name` attribute, and that overlay's tint is decided against the owning
+-- element -- MATCHED when the name is one of that element's field names, MISSED
+-- when it is not. Nothing else influences the tint. A `command-input` overlay
+-- is tinted with a fixed colour whatever the element's state, so it carries no
+-- predicate and stays with the other renderer constants.
+-- Overlays are tinted as the card is drawn, so the trigger is the card
+-- re-render.
+--
+-- wf_field_overlay_names(element) -- black box: the field name carried by every
+-- node of the element's wireframe tree whose `field-name` attribute is set, one
+-- entry per such node in tree order. A name may repeat (the same field marked
+-- on several nodes) and need not be a field of the element. This walk is the
+-- only thing the spec needs from the node tree.
+rule WireframeFieldOverlaysTint {
+  when: ElementRerendered(element)
+  let overlay_names = wf_field_overlay_names(element)
+  ensures:
+    for name in overlay_names:
+      if name in element.field_names:
+        WireframeFieldOverlayMatched(element: element, field_name: name)
+      else:
+        WireframeFieldOverlayMissed(element: element, field_name: name)
 }
 
 -- == Invalid data ===========================================================
