@@ -35,7 +35,7 @@
               queued))
     {:store store :effects []}))
 
-;; == Viewport surface: pan / zoom / resize ===================================
+;; == Viewport surface: pan / zoom ============================================
 
 (defn pan
   "rule ViewportPans: pan_x/pan_y are the cumulative delta from gesture
@@ -52,11 +52,6 @@
   {:store (update-in store [:visualization :zoom]
                       #(clamp (* % factor) config/min-zoom config/max-zoom))
    :effects []})
-
-(defn resize-viewport
-  "rule ViewportResizes: pure renderer concern, no entity state changes."
-  [store width height]
-  {:store store :effects [{:type :canvas-resized :width width :height height}]})
 
 (defn snap-to-content
   "rule ViewportSnapsToContent: fits + centers the ENTIRE model, clearing any

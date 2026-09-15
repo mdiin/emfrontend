@@ -92,13 +92,6 @@
             {:keys [store]} (interaction/zoom store 0.01)]
         (is (= config/min-zoom (get-in store [:visualization :zoom])))))))
 
-(deftest viewport-resizes-is-a-pure-render-effect-test
-  (testing "rule ViewportResizes: no entity state changes, only CanvasResized"
-    (let [store (base-store)
-          {:keys [store effects]} (interaction/resize-viewport store 800.0 600.0)]
-      (is (= store (base-store)))
-      (is (= [{:type :canvas-resized :width 800.0 :height 600.0}] effects)))))
-
 ;; == TimelineFilter surface ====================================================
 
 (deftest timeline-filter-scopes-test

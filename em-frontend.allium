@@ -667,15 +667,6 @@ rule ViewportZooms {
     viz.zoom = clamp(viz.zoom * zoom, config.min_zoom, config.max_zoom)
 }
 
--- Resizing the browser window resizes the rendering viewport (the visible
--- window into the pannable-zoomable world). It is a pure renderer concern:
--- content-driven timeline/slice/swimlane layout is unaffected, so no entity
--- state changes and only a declarative render effect fires.
-rule ViewportResizes {
-  when: ResizeViewport(viewer, viz, width, height)
-  ensures: CanvasResized(width: width, height: height)
-}
-
 -- Snapping to content brings the whole model into view: zoom is set so all the
 -- laid-out content fits the viewport at once, and pan is set so that content
 -- sits centred in it. The fit is over the entire model, so an active timeline
@@ -1051,7 +1042,10 @@ surface StreamIngest {
 
 -- The viewport the viewer manipulates: zoom and pan, and the begin/end of an
 -- interaction gesture. While a gesture is in progress, incoming deltas are
--- deferred (see UserInteractionDefers / InteractionEndFlushesQueue).
+-- deferred (see UserInteractionDefers / InteractionEndFlushesQueue). A viewport
+-- resize is not an observed behaviour here: the rendering viewport is sized by
+-- the rendering framework, and resizing it does not reflow content-driven
+-- timeline/slice/swimlane layout, so there is no action, rule or effect for it.
 surface Viewport {
   facing viewer: Viewer
   context viz: Visualization
@@ -1072,8 +1066,6 @@ surface Viewport {
     -- Fits and centres the entire model in the viewport; clears any timeline
     -- filter first, so the fit is over the whole model rather than the subset.
     SnapToContent(viewer, viz)
-    -- Browser window resize; resizes the rendering viewport only, not layout.
-    ResizeViewport(viewer, viz, width, height)
 }
 
 -- The rendered canvas: the read-only row/column/band layout. Exposes the
