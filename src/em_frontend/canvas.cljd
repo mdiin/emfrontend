@@ -274,6 +274,10 @@
 
 ;; == The painter ===============================================================
 
+;; A card has a fixed height, so only the leading canvas fields of an element
+;; are drawn; the rest do not fit.
+(def ^:private max-card-field-lines 4)
+
 (defn- draw-element-card
   "Draws one element card onto `canvas` at `rect`. Factored out so the
    alpha-fading path can wrap it in saveLayer/restore."
@@ -297,7 +301,7 @@
                           :width (- (:width rect) 16.0)
                           :height (- (:height rect) 36.0)}]
         (draw-wf-node canvas content-rect (:wireframe element) element))
-      (doseq [[i field] (map-indexed vector (take 4 (model/canvas-fields element)))]
+      (doseq [[i field] (map-indexed vector (take max-card-field-lines (model/canvas-fields element)))]
         (draw-text canvas (str (:name field) ": " (name (or (:type field) "")))
                    (+ (:x rect) 8.0) (+ (:y rect) 28.0 (* i 16.0))
                    (m/TextStyle .fontSize 11.0 .color m/Colors.grey.shade700)

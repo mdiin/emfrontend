@@ -1081,7 +1081,10 @@ surface Viewport {
 -- is exposed only for a swimlane holding at least one placement in this timeline;
 -- the default unnamed band row (an element with no swimlane assignment — the
 -- Element.swimlane = nil case) appears where a placed element in this timeline
--- has no swimlane.
+-- has no swimlane. A card has a fixed height, so it renders only the leading
+-- canvas_fields entries — as many as that height fits — rather than the whole
+-- list; the exact count is a renderer constant, left to the renderer in the
+-- same spirit as the layout geometry and extent measurement above.
 surface Canvas {
   facing viewer: Viewer
   context timeline: Timeline
