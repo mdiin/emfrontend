@@ -182,25 +182,13 @@ entity Element {
   kind: ElementKind
   context: ElementContext
 
-  -- True iff every field on the element is sourced (carried, derived, or
-  -- introduced). When false, the card renders a persistent red border and
-  -- a hover tooltip listing the unsourced fields.
-  --   CARRIED    - some incoming connection's from-element has a field with
-  --                the same name; or
-  --   DERIVED    - some incoming connection carries a FieldDerivation naming
-  --                this field as its target, and every one of that
-  --                derivation's source_fields exists on that connection's
-  --                from-element (one source with a different name is a rename;
-  --                many is an aggregation; the transform is opaque); or
-  --   INTRODUCED - this element carries a FieldOrigin override for this field.
-  is_information_complete:
-    fields.all(f =>
-      incoming.any(c => c.from.fields.any(ff => ff.name = f.name))
-      or incoming.any(c => c.derivations.any(d =>
-          d.target_field = f.name
-          and d.source_fields.all(src =>
-              c.from.fields.any(sf => sf.name = src))))
-      or field_origins.any(o => o.field = f.name))
+  -- Supplied by the wire: emcli computes this flag (true iff every field on
+  -- the element is sourced -- carried, derived, or introduced) and always
+  -- emits it on the element entity, and the frontend reads it from the
+  -- delta/snapshot. Its derived counterpart is unsourced_fields below: the
+  -- element is complete iff that list is empty. When false, the card renders
+  -- a persistent red border and a hover tooltip listing the unsourced fields.
+  is_information_complete: Boolean
 
   fields: List<Field>
   field_origins: List<FieldOrigin>
@@ -221,7 +209,9 @@ entity Element {
 
   -- Names of fields that are neither introduced here (no FieldOrigin) nor
   -- carried/derived by an incoming connection. These are the unsourced fields
-  -- the incomplete tooltip lists.
+  -- the incomplete tooltip lists. The derived counterpart of the wire-supplied
+  -- is_information_complete above: the element is complete iff this list is
+  -- empty.
   origin_field_names: field_origins -> field
   carried_field_names: fields where incoming.any(c => c.from.fields.any(ff => ff.name = name)) -> name
   derived_field_names: fields where incoming.any(c => c.derivations.any(d =>
@@ -768,7 +758,7 @@ rule TimelineFilterCleared {
 --   DERIVED - c carries a FieldDerivation whose target_field is n and every
 --             name in that derivation's source_fields exists as a field name
 --             on c.from (a fully satisfied derivation).
--- This is exactly the carried/derived notion Element.is_information_complete
+-- This is exactly the carried/derived notion Element.unsourced_fields
 -- tests, so the two never diverge. The walk starts at (element, field_name) and
 -- continues upstream through every supplying connection: through each satisfied
 -- derivation's source_fields, and through the same field name for a same-named

@@ -92,6 +92,30 @@
             {:keys [store]} (interaction/zoom store 0.01)]
         (is (= config/min-zoom (get-in store [:visualization :zoom])))))))
 
+(deftest viewport-snaps-to-content-test
+  (testing "rule ViewportSnapsToContent: fits the whole model into the viewport
+            and centres the fitted content (zoom = the smaller axis ratio)"
+    (let [{:keys [store]} (interaction/snap-to-content (base-store) 100.0 50.0 200.0 200.0)]
+      (is (= 2.0 (get-in store [:visualization :zoom])))
+      (is (= 0.0 (get-in store [:visualization :pan_x])))
+      (is (= 50.0 (get-in store [:visualization :pan_y])))))
+  (testing "any active timeline filter is cleared first; every timeline animates back in"
+    (let [filtered (assoc-in (base-store) [:visualization :filtered_timeline] :t1)
+          {:keys [store effects]} (interaction/snap-to-content filtered 100.0 50.0 200.0 200.0)]
+      (is (nil? (get-in store [:visualization :filtered_timeline])))
+      (is (some #(and (= :timeline-appears (:type %)) (= :t1 (:timeline %))) effects))
+      (is (some #(and (= :timeline-appears (:type %)) (= :t2 (:timeline %))) effects))))
+  (testing "the zoom clamps to config/max-zoom, and the pan centres that clamped zoom"
+    (let [{:keys [store]} (interaction/snap-to-content (base-store) 10.0 10.0 1000.0 1000.0)]
+      (is (= config/max-zoom (get-in store [:visualization :zoom])))
+      (is (= 475.0 (get-in store [:visualization :pan_x])))
+      (is (= 475.0 (get-in store [:visualization :pan_y])))))
+  (testing "empty content resets to config's defaults rather than dividing by zero"
+    (let [{:keys [store]} (interaction/snap-to-content (base-store) 0.0 0.0 200.0 200.0)]
+      (is (= config/default-zoom (get-in store [:visualization :zoom])))
+      (is (= config/default-pan-x (get-in store [:visualization :pan_x])))
+      (is (= config/default-pan-y (get-in store [:visualization :pan_y]))))))
+
 ;; == TimelineFilter surface ====================================================
 
 (deftest timeline-filter-scopes-test

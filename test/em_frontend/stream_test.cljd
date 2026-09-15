@@ -1,10 +1,12 @@
 (ns em-frontend.stream-test
-  "spec: contract ChangeStream. Fixtures below are byte-for-byte payloads --
-   the snapshot captured live from a running `emcli serve`, the deltas taken
-   verbatim from ../thecli/docs/change-stream.md's own worked examples --
-   so this test is the guard against wire-schema drift, not a re-statement
-   of my own assumptions."
+  "spec: contract ChangeStream. Fixtures below are the guard against
+   wire-schema drift, not a re-statement of my own assumptions: the snapshot
+   is captured live from a running `emcli serve`, the two element deltas
+   (CreateElement, SetImageUrl) and the DeleteTimeline cascade are verbatim
+   from ../thecli/docs/change-stream.md's own worked examples, and
+   delta-add-wireframe is hand-built to the wireframe wire shape."
   (:require [cljd.test :refer [deftest is testing]]
+            [em-frontend.model :as model]
             [em-frontend.stream :as stream]))
 
 ;; Captured live from `emcli serve --port 8090` after authoring one timeline,
@@ -39,12 +41,35 @@
       (is (= [{:target_field "total" :source_fields ["amount"]}]
              (get-in seed [:connections 12 :derivations]))))))
 
+(deftest wire-is-information-complete-matches-derived-unsourced-fields-test
+  (testing "A4 guard: the wire-supplied is_information_complete on every
+            element agrees with the derived unsourced_fields the incomplete
+            tooltip renders -- change-stream.md:100 and :224 both claim the
+            flag is always present and is derived from field sourcing"
+    (let [seed (stream/normalize-snapshot real-snapshot)
+          conns-with-from (fn [element-id]
+                            (mapv #(assoc % :from-fields
+                                          (get-in seed [:elements (:from %) :fields]))
+                                  (filterv #(= element-id (:to %))
+                                           (vals (:connections seed)))))]
+      (doseq [[id element] (:elements seed)]
+        (is (= (get-in seed [:elements id :is_information_complete])
+               (empty? (model/unsourced-fields element (conns-with-from id))))
+            (str "element " id " (" (:name element) "): parsed "
+                 (get-in seed [:elements id :is_information_complete])
+                 " but its sourced fields say "
+                 (empty? (model/unsourced-fields element (conns-with-from id))))))
+      (is (false? (get-in seed [:elements 8 :is_information_complete]))
+          "element 8's unsourced fields (no FieldOrigin, nothing carries them)")
+      (is (true? (get-in seed [:elements 9 :is_information_complete]))
+          "element 9's fields are all sourced (carried + derived)"))))
+
 ;; From change-stream.md's own worked examples, verbatim.
 (def delta-create-element
-  "{\"op\":\"CreateElement\",\"changes\":[{\"action\":\"created\",\"type\":\"element\",\"id\":5,\"entity\":{\"model\":1,\"name\":\"PlaceOrder\",\"kind\":\"command\",\"context\":\"internal\",\"fields\":[],\"id\":5,\"type\":\"element\"}}]}")
+  "{\"op\":\"CreateElement\",\"changes\":[{\"action\":\"created\",\"type\":\"element\",\"id\":5,\"entity\":{\"model\":1,\"name\":\"PlaceOrder\",\"kind\":\"command\",\"context\":\"internal\",\"fields\":[],\"field_origins\":[],\"is_information_complete\":true,\"id\":5,\"type\":\"element\"}}]}")
 
 (def delta-set-image-url
-  "{\"op\":\"SetImageUrl\",\"changes\":[{\"action\":\"updated\",\"type\":\"element\",\"id\":4,\"entity\":{\"model\":1,\"name\":\"OrderScreen\",\"kind\":\"screen\",\"context\":\"internal\",\"fields\":[{\"name\":\"id\",\"type\":\"uuid\",\"optional\":false,\"cardinality\":\"single\",\"subfields\":[]}],\"image_url\":\"http://x/s.png\",\"id\":4,\"type\":\"element\"}}]}")
+  "{\"op\":\"SetImageUrl\",\"changes\":[{\"action\":\"updated\",\"type\":\"element\",\"id\":4,\"entity\":{\"model\":1,\"name\":\"OrderScreen\",\"kind\":\"screen\",\"context\":\"internal\",\"fields\":[{\"name\":\"id\",\"type\":\"uuid\",\"optional\":false,\"cardinality\":\"single\",\"subfields\":[]}],\"field_origins\":[],\"is_information_complete\":true,\"image_url\":\"http://x/s.png\",\"id\":4,\"type\":\"element\"}}]}")
 
 (def delta-cascading-delete-timeline
   "{\"op\":\"DeleteTimeline\",\"changes\":[{\"action\":\"deleted\",\"type\":\"placement\",\"id\":7},{\"action\":\"deleted\",\"type\":\"spec-step\",\"id\":10},{\"action\":\"deleted\",\"type\":\"spec-step\",\"id\":11},{\"action\":\"deleted\",\"type\":\"specification\",\"id\":9},{\"action\":\"deleted\",\"type\":\"slice\",\"id\":4},{\"action\":\"deleted\",\"type\":\"timeline\",\"id\":3}]}")
@@ -54,7 +79,7 @@
     (is (= 1 (count changes)))
     (is (= {:entity :element :change :created
             :data {:id 5 :name "PlaceOrder" :kind :command :context :internal
-                   :is_information_complete nil :fields [] :field_origins []
+                   :is_information_complete true :fields [] :field_origins []
                    :swimlane nil :image_url nil :wireframe nil}}
            (first changes)))))
 

@@ -122,6 +122,17 @@ Raw output recorded verbatim:
 
 Exit code: `1`.
 
+> **2026-09-15 — baseline after the A4 spec edit.** The spec has since moved
+> (A4: `Element.is_information_complete` re-declared as wire-supplied; see
+> `2026-09-15-spec-code-weed.md`). Re-running
+> `/home/mvi/.local/bin/allium check em-frontend.allium` still gives the **same
+> five diagnostics, same codes, same order, same severities**, exit code still
+> `1`. The only change is location: the `allium.field.unused` for `SpecStep.spec`
+> moved from line 268 to **line 258** (the edit removed a net 10 lines above it;
+> the file went from 1171 to 1161 lines). The other four (lines 37, 40, 40, 139)
+> are unchanged. A fresh session should expect **258, not 268**, and should
+> still gate on the diagnostic list rather than the exit status.
+
 ### Any new diagnostic is a regression
 
 Compare the **diagnostic list**, not just the exit code (see the exit-code

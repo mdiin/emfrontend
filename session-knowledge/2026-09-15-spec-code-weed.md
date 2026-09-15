@@ -252,12 +252,35 @@ Re-checked against the current tree; all still as previously recorded. **Do not
    (`change-stream.md:241` against `change-stream.schema.json` and
    `wireframe.clj`); the frontend tests encode the wrong shape and must move
    with it.
-4. **human decision — A4.** Decide whether `is_information_complete` is derived
-   in code or wire-supplied, then make spec and code say the same thing.
-5. **change-code — A5.** Restore the fixtures to verbatim copies of the doc's
-   payloads so the wire-drift guard can actually guard.
-6. **change-code — B1.** Add a snap-to-content test (its siblings are covered,
-   so the omission is conspicuous).
+4. **human decision — A4.** *(done — spec side)* Decide whether
+   `is_information_complete` is derived in code or wire-supplied, then make spec
+   and code say the same thing. *(Resolved by moving the SPEC side:
+   `em-frontend.allium` now re-declares `Element.is_information_complete` as the
+   wire-supplied `is_information_complete: Boolean` (previously a derived clause
+   at old lines 185-203); the sourcing predicate now lives only in
+   `unsourced_fields`, whose comment gained a cross-reference, and the
+   `FieldFlowHighlights` prose reference was retargeted from
+   `Element.is_information_complete` to `Element.unsourced_fields`. No
+   production code changed: the store still keeps the wire flag
+   (`stream.cljd:85`), and `canvas.cljd`, `app.cljd`,
+   `panels/element_details.cljd` and `store.cljd` still read it.)*
+5. **change-code — A5.** *(done)* Restore the fixtures to verbatim copies of the
+   doc's payloads so the wire-drift guard can actually guard. *(Done: the two
+   fixtures in `test/em_frontend/stream_test.cljd` (`delta-create-element`,
+   `delta-set-image-url`) are now byte-for-byte copies of `change-stream.md:150`
+   and `:157` — each gained `"field_origins":[]` and
+   `"is_information_complete":true` — and the expected map in
+   `normalize-create-element-delta-test` moved from `:is_information_complete
+   nil` to `true`. The ns docstring was narrowed to name which fixtures are
+   verbatim and to state that `delta-add-wireframe` is hand-built to the
+   wireframe wire shape; `delta-cascading-delete-timeline` was already verbatim.
+   A3 remains open and its wireframe fixture was deliberately left untouched.)*
+6. **change-code — B1.** *(done)* Add a snap-to-content test (its siblings are
+   covered, so the omission is conspicuous). *(Done: a new
+   `viewport-snaps-to-content-test` in `test/em_frontend/interaction_test.cljd`
+   covers fit+centre, the filter-cleared-and-timelines-reappear case, the clamp
+   binding against `config/max-zoom`, and the empty-content reset to `config`'s
+   defaults. No production code changed.)*
 7. **change-docs.** The two corrections this pass made were **annotated into
    `2026-09-15-model-reload-button.md`** (the disproved "no new transition"
    claim, and the discarded `retry-stream!` handle), per the append/annotate
@@ -267,6 +290,22 @@ Re-checked against the current tree; all still as previously recorded. **Do not
 9. **no-action** for all of class C (section 4).
 10. **triage** for the remaining B items (B2–B9; B2 in particular needs an
     async/HTTP harness before it can even be attempted).
+
+> **2026-09-15 — A4/A5/B1 closed.** The three (items 4–6 above) are now
+> resolved; **A3 remains open**, and its wireframe fixture was deliberately left
+> untouched. **B5** (the testable face of A4) was closed as a side effect of
+> A4: the new `wire-is-information-complete-matches-derived-unsourced-fields-test`
+> in `test/em_frontend/stream_test.cljd` asserts, over the `real-snapshot`
+> fixture, that each parsed element's `:is_information_complete` equals
+> `(empty? (model/unsourced-fields element conns-with-from))` (element 8 `false`,
+> element 9 `true`). Verification this session: `clj -M:cljd:test test` exit 0
+> with `+100: All tests passed!` (both new tests present),
+> `clj -M:cljd clean && clj -M:cljd compile` exit 0, and
+> `/home/mvi/.local/bin/allium check em-frontend.allium` exit 1 with the same
+> five diagnostics bar the `SpecStep.spec` line shift (268 → 258; see
+> `2026-09-15-spec-code-alignment.md` section b). The preamble verdict above
+> ("three remain open (A3, A4, A5)") is left verbatim: it records the state the
+> pass itself measured.
 
 ---
 
