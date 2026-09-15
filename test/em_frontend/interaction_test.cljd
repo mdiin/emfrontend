@@ -63,7 +63,7 @@
     (is (= (base-store) store))
     (is (= [] effects))))
 
-;; == Viewport: pan / zoom / resize ============================================
+;; == Viewport: pan / zoom =====================================================
 
 (deftest viewport-pans-test
   (testing "rule ViewportPans: cumulative delta, not an absolute set"
