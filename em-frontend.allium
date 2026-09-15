@@ -90,8 +90,8 @@ contract ChangeStream {
     -- store is seeded from it before any delta is processed.
 
   @invariant DeltaOrder
-    -- Deltas are delivered and applied strictly in commit order, one per
-    -- authoring mutation, with no gap, no reordering and no duplication.
+    -- Deltas are delivered strictly in commit order, one per authoring
+    -- mutation, with no gap, no reordering and no duplication.
 
   @invariant NoReplay
     -- The stream has no replay: on reconnect the consumer receives a fresh
@@ -748,7 +748,9 @@ rule FieldFlowHighlights {
 -- == Invalid data ===========================================================
 
 -- A delta that fails validation is surfaced visibly rather than silently
--- dropped; the rest of the store is left intact.
+-- dropped; the rest of the store is left intact. The discarded delta's
+-- mutation is not applied to the store: nothing it would have changed takes
+-- effect.
 rule InvalidDataVisible {
   when: InvalidDeltaReceived(_, delta)
   ensures: InvalidDataIndicatorShown(delta: delta)
@@ -980,8 +982,15 @@ surface StreamIngest {
 
   @guarantee NoInterruption
     -- No delta is applied while the user is interacting: deltas are held in a
-    -- queue (Visualization.interacting = true) and flushed in order once the
+    -- queue (Visualization.interacting = true) and flushed once the
     -- interaction ends.
+
+  @guarantee ValidDeltasAppliedInOrder
+    -- A delta that passes validation is applied to the store in the order it
+    -- was received, including deltas that were held while the user was
+    -- interacting and later flushed from the queue. A delta that fails
+    -- validation is skipped rather than applied out of turn, so the applied
+    -- sequence is the received sequence with the invalid entries omitted.
 
   @guarantee LargeModelScale
     -- Ingest, layout and re-render remain responsive for models containing
