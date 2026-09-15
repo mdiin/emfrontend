@@ -293,8 +293,8 @@ Re-checked against the current tree; all still as previously recorded. **Do not
    deliberately-unmodelled layer.)*
 9. **no-action** for all of class C (section 4).
 10. **triage** for the remaining B items (B2–B9; B2 in particular needs an
-    async/HTTP harness before it can even be attempted). *(partly done — B3–B8
-    triaged; B2 and B9 left unhandled)*
+    async/HTTP harness before it can even be attempted). *(partly done — B3–B9
+    triaged; B2 left unhandled)*
 
 > **2026-09-15 — A4/A5/B1 closed.** The three (items 4–6 above) are now
 > resolved; **A3 remains open**, and its wireframe fixture was deliberately left
@@ -351,6 +351,13 @@ Re-checked against the current tree; all still as previously recorded. **Do not
 > five diagnostics at lines 37/40/40/139/258 — all three spec prose insertions
 > sit below line 258, so the recorded baseline did not move (the spec grew 1161
 > → 1173 lines).
+
+> **2026-09-15 — B9 closed.** (Its line numbers had drifted: `config.cljd:13` not :12, `store.cljd:5-7` not :5-6, the actor block now 909-923 not 912-921; `em-frontend.allium:84` was exact.)
+> - **`store.cljd` docstring corrected:** effects are folded into the app's `ui-atom` by `apply-outcome!` -- the painter reads `:connection-visual` and `:element-current-alphas` from it -- not by `canvas`/the panels; seven effect types (`:timeline-laid-out`, `:element-rerendered`, `:connection-rerendered`, `:canvas-relaid-out`, `:incomplete-border-rendered`, `:delta-queued`, `:queued-deltas-flushed`) are currently dropped by that `case`'s default, and `:error-overlay-shown` is folded into an unread ui key.
+> - **`connect` vs `connect!`: recorded at the seam on both sides.** The contract's `connect` names what a (re)connection yields (the snapshot first) and nothing in the spec calls it; the app's `connect!` returns the driver handle and delivers the seed by callback. No handle construct was invented: it would have no observable behaviour, and the driver lifecycle is already disclaimed at `ReloadRestartsConnection`.
+> - **Actors: recorded as deliberate.** `Viewer` and `StreamSource` are boundary constructs giving the nine + one surfaces their `facing` party; the code's viewer is the running app and its source is emcli, so no code counterpart is expected.
+> - **`animation-duration-ms`: recorded as a renderer timing constant.** No spec counterpart by design -- the spec names the Appears/Disappears effects, not their duration -- and the animation rules now carry the same "renderer constant" disclaimer as the layout geometry.
+> - By-products found, recorded not fixed: `:error-overlay-shown` reaches `ui-atom`'s `:failed-connection` which nothing reads (the banner keys off the store's `:visualization :state`), and `next_delta` has the same callback-shaped mismatch as `connect`.
 
 ---
 

@@ -10,4 +10,6 @@
 (def min-zoom 0.1)
 (def max-zoom 5.0)
 
+;; A renderer constant with no spec counterpart: the spec models animation as
+;; effect identity only, not timing -- left to the renderer in the same spirit as the layout geometry and extent measurement.
 (def animation-duration-ms 250)

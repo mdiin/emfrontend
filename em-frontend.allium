@@ -450,6 +450,11 @@ rule ReloadRestartsConnection {
 
 -- == Delta application: animation, layout and re-render =====================
 
+-- The timing of the Appears/Disappears effects -- how long an animation
+-- takes -- is a renderer constant, left to the renderer in the same spirit
+-- as the layout geometry and extent measurement; the model names the
+-- effects, not their duration.
+
 -- A newly created element animates in.
 rule ElementCreationAnimates {
   when: element: Element.created
@@ -910,6 +915,12 @@ invariant ConnectionsRenderRightToLeft {
 -- Actor Declarations
 ------------------------------------------------------------
 
+-- The actors are boundary-modelling constructs with no code counterpart by
+-- design: the viewer is the running app (its transient state held outside the
+-- model, in the app's ui-atom), the source is the emcli process at the other
+-- end of the stream, and the actors exist so each surface can declare the
+-- party it faces.
+
 -- The only human party is a viewer of the read-only visualization. There is
 -- no authentication, so any session is a viewer.
 actor Viewer {
@@ -1058,6 +1069,7 @@ surface StreamErrorOverlay {
 -- contract and provides the trigger entry points that the delta-application
 -- rules listen for. Each provided action corresponds to one kind of committed
 -- change delivered on the stream.
+-- The demanded contract's `connect` names what a (re)connection yields -- the snapshot first -- not the app's `connect!`, which returns a driver handle whose lifecycle the model deliberately leaves out (see `rule ReloadRestartsConnection`).
 surface StreamIngest {
   facing source: StreamSource
 

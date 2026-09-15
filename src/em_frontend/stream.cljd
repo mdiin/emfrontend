@@ -366,7 +366,15 @@
    different rule: :connecting for a cold start or a retry,
    :reconnecting for a reload. Later attempts are backoff retries and always
    announce :reconnecting, so `reconnecting -> connecting` -- an edge
-   SSEConnection's transition graph does NOT declare -- is never written."
+   SSEConnection's transition graph does NOT declare -- is never written.
+
+   `connect!` is the app's implementation of `contract ChangeStream.connect`,
+   but the contract's `connect` names what a (re)connection yields -- the
+   snapshot first -- whereas this function's return value is the driver handle
+   and the seed arrives through the `on-snapshot` callback. The driver
+   lifecycle that handle represents is deliberately outside the model, the same
+   lifecycle disclaimed at `rule ReloadRestartsConnection` in
+   em-frontend.allium."
   [stream-url initial-state on-sse-state on-snapshot on-delta on-invalid]
   (let [stopped (atom false)
         live! (atom nil)

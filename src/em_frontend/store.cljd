@@ -3,8 +3,20 @@
    em-frontend.allium. A single normalized, atom-backed store indexed by
    entity id; every rule is a pure function `store -> {:store :effects}`.
    `effects` are the declarative render/animation triggers each rule
-   `ensures` (ElementAppears, TimelineLaidOut, CanvasRelaidOut, ...) --
-   em-frontend.canvas and the panels consume them, they are never stored.
+   `ensures` (ElementAppears, TimelineLaidOut, CanvasRelaidOut, ...). They are
+   never stored, and the only consumer is `apply-outcome!` in app.cljd, whose
+   `case` folds the animation and connection-visual effects into the app's
+   ui-atom for the painter to read: `:connection-visual` (app.cljd:179,
+   canvas.cljd:363), `:element-current-alphas` (app.cljd:180, canvas.cljd:384)
+   and the canvas layer's timeline fades via
+   `:timeline-target-opacities`/`:fading-out-timelines` (app.cljd:283, :331).
+   The layout/geometry effects (`:timeline-laid-out`, `:element-rerendered`,
+   `:connection-rerendered`, `:canvas-relaid-out`, `:incomplete-border-rendered`,
+   `:delta-queued`, `:queued-deltas-flushed`) currently fall through that
+   `case`'s default and are dropped, and `:error-overlay-shown` is folded into
+   ui-atom's `:failed-connection`, which nothing reads -- the error banner keys
+   off the store's `:visualization :state`. Panels consume no effects at all:
+   they take plain data plus callbacks.
 
    `becomes`/`transitions_to` semantics (used by IncompleteElementMarked,
    the Visualization and SSEConnection transitions state {} blocks, and
