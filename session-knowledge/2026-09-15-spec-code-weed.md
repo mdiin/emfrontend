@@ -285,8 +285,12 @@ Re-checked against the current tree; all still as previously recorded. **Do not
    `2026-09-15-model-reload-button.md`** (the disproved "no new transition"
    claim, and the discarded `retry-stream!` handle), per the append/annotate
    convention — nothing there was overwritten.
-8. **optional spec prose** acknowledging that `ReloadModel` is realised by
+8. **optional spec prose** *(done)* acknowledging that `ReloadModel` is realised by
    retiring the live driver and starting a fresh attempt (section 1, point 3).
+   *(Done: the comment on `ReloadRestartsConnection` now states that the app
+   realises the reload as a driver swap -- the live driver retired and a fresh
+   attempt started -- with `RetryStream`'s `start-stream!` cited as the same
+   deliberately-unmodelled layer.)*
 9. **no-action** for all of class C (section 4).
 10. **triage** for the remaining B items (B2–B9; B2 in particular needs an
     async/HTTP harness before it can even be attempted). *(partly done — B3–B8

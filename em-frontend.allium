@@ -436,6 +436,11 @@ rule RetryRestartsConnection {
 -- the view. Because the reload only fires from `connected`, and the reloaded
 -- connection leaves that state, this `requires` is also the single-in-flight
 -- guard: while the fresh attempt is starting a second reload cannot fire.
+-- The app realises the reload as a driver swap -- the live SSE driver is
+-- retired and a fresh attempt started -- not as a reconnection of the
+-- existing one. That lifecycle is deliberately outside the model, as
+-- `RetryStream`'s `start-stream!` already is: the rule states the connection
+-- state the viewer observes, not how the driver is replaced.
 rule ReloadRestartsConnection {
   when: ReloadModel(viewer, viz)
   let connection = SSEConnection
