@@ -57,18 +57,35 @@
 
 (defn- norm-wireframe-node
   "Normalizes one WireframeNode from its JSON wire shape
-   [tag-str, {attrs-including-\"-id\"}, ...children]
-   into {:tag :keyword :attrs {kw val} :children [...]} with \"-id\" stripped."
+   [tag-str, {\"-id\" id}, attrs-map?, ...children] into
+   {:tag :keyword :attrs {kw val} :children [...]}.
+
+   The node's second element is its ID MAP -- it always carries \"-id\" and
+   nothing else -- and its content attributes, when it has any, travel in a
+   SEPARATE third map rather than being merged into that id map (see
+   ../thecli/docs/change-stream.schema.json $defs/WireframeNode and
+   ../thecli/doc/wireframe-dsl.md). A map in the third slot is that attrs map;
+   anything else there is already a child, which is what distinguishes a node
+   with attributes from one whose first child is a text string. The id itself
+   is dropped: it addresses nodes for the wire's own incremental edits, and
+   the frontend always receives whole trees -- the spec's wireframe note calls
+   node identities pure wire normalisation. The tree's root tag is \"canvas\".
+
+   The attrs slot is identified with `dart/is?` against dart:core/Map, the way
+   ClojureDart's own `keys`/`vals` recognise a Dart map: `map?` is defined as
+   `(satisfies? IMap x)`, and a JSON object decoded by dart:convert satisfies
+   no ClojureDart protocol, so `map?` is false for every attrs map on the wire
+   and would silently drop all of them."
   [node]
-  (let [tag     (keyword (get node 0))
-        raw     (get node 1)
-        attrs   (into {} (keep (fn [[k v]]
-                                 (when (not= k "-id")
-                                   [(keyword k) v])))
-                      raw)
-        children (mapv (fn [c]
-                         (if (string? c) c (norm-wireframe-node c)))
-                       (drop 2 node))]
+  (let [tag        (keyword (get node 0))
+        attrs-slot (get node 2)
+        has-attrs? (dart/is? attrs-slot dart:core/Map)
+        attrs      (if has-attrs?
+                     (into {} (map (fn [[k v]] [(keyword k) v]) attrs-slot))
+                     {})
+        children   (mapv (fn [c]
+                           (if (string? c) c (norm-wireframe-node c)))
+                         (drop (if has-attrs? 3 2) node))]
     {:tag tag :attrs attrs :children children}))
 
 (defn- norm-element

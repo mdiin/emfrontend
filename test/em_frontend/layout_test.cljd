@@ -128,7 +128,9 @@
 
 ;; == Screen element card sizing ===============================================
 
-(def screen-el {:id :es :kind :screen :swimlane nil :wireframe {:tag :screen :attrs {} :children []}})
+;; The wireframe tree here is in its NORMALIZED shape, so its root tag is the
+;; wire DSL's own root tag, :canvas (norm-wireframe-node's output).
+(def screen-el {:id :es :kind :screen :swimlane nil :wireframe {:tag :canvas :attrs {} :children []}})
 (def screen-el-no-wf {:id :es :kind :screen :swimlane nil})
 (def command-el {:id :ec :kind :command :swimlane nil})
 

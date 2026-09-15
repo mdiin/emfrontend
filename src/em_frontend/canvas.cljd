@@ -229,7 +229,10 @@
 
 (defn- draw-wf-overlays
   "Semi-transparent command-input (blue) and field-name (green/red) overlays.
-   Applied to every node that carries those attrs, regardless of tag."
+   Applied to every node that carries those attrs, regardless of tag --
+   including the :col and :row containers, whose overlays are drawn over the
+   children they have just laid out. The root :canvas is the one tag that can
+   never show one: the wire DSL gives it no attributes at all."
   [^m/Canvas canvas rect attrs field-names]
   (let [r (m/RRect.fromRectAndRadius (rect->m rect) (m/Radius.circular 3.0))]
     (when (:command-input attrs)
@@ -242,7 +245,11 @@
 (defn- draw-wf-node
   "Bare string children (plain text in the wire DSL) render via the :text
    branch; map children dispatch on their :tag. A node with no :tag falls
-   through to the generic leaf branch without crashing."
+   through to the generic leaf branch without crashing.
+
+   The tree's root is always tagged :canvas (it IS the wireframe, there is no
+   wrapper object -- see the wireframe DSL), so :canvas lays its children out
+   top-to-bottom exactly as :col does."
   [^m/Canvas canvas rect node element]
   (let [{:keys [tag attrs children]}
         (if (string? node)
@@ -251,9 +258,15 @@
         field-names (into #{} (map :name) (:fields element))
         x (:x rect) y (:y rect) w (:width rect) h (:height rect)]
     (case tag
-      :screen (draw-wf-children canvas rect children element)
-      :col    (draw-wf-children canvas rect children element)
-      :row    (draw-wf-row-children canvas rect children element)
+      ;; :canvas takes no attributes at all (the wire DSL gives it none), so it
+      ;; has no overlay to draw; :col and :row may carry field-name or
+      ;; command-input like any other non-leaf node, so their overlay is drawn
+      ;; once their children are in place.
+      :canvas (draw-wf-children canvas rect children element)
+      :col    (do (draw-wf-children canvas rect children element)
+                  (draw-wf-overlays canvas rect attrs field-names))
+      :row    (do (draw-wf-row-children canvas rect children element)
+                  (draw-wf-overlays canvas rect attrs field-names))
       :divider
       (do (.drawLine canvas (m/Offset x (+ y (/ h 2.0)))
                             (m/Offset (+ x w) (+ y (/ h 2.0)))
