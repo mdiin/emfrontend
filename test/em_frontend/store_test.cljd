@@ -135,7 +135,7 @@
                    :is_information_complete false :fields [] :field_origins []
                    :swimlane nil :image_url nil}
           {:keys [effects]} (store/element-created store element)]
-      (is (some #(= :amber-border-rendered (:type %)) effects)))))
+      (is (some #(= :incomplete-border-rendered (:type %)) effects)))))
 
 (deftest element-update-rerenders-test
   (let [store (store-with-snapshot)
@@ -148,20 +148,20 @@
 
 (deftest incomplete-element-marked-becomes-semantics-test
   (let [store (store-with-snapshot)]
-    (testing "true -> false fires AmberBorderRendered"
+    (testing "true -> false fires IncompleteBorderRendered"
       (let [updated (assoc (get-in store [:elements :e1]) :is_information_complete false)
             {:keys [effects]} (store/element-updated store updated)]
-        (is (some #(= :amber-border-rendered (:type %)) effects))))
+        (is (some #(= :incomplete-border-rendered (:type %)) effects))))
     (testing "false -> false does not re-fire"
       (let [already-false (assoc-in store [:elements :e1 :is_information_complete] false)
             updated (assoc (get-in already-false [:elements :e1]) :name "still incomplete")
             {:keys [effects]} (store/element-updated already-false updated)]
-        (is (not (some #(= :amber-border-rendered (:type %)) effects)))))
+        (is (not (some #(= :incomplete-border-rendered (:type %)) effects)))))
     (testing "false -> true does not fire (rule only watches for becomes false)"
       (let [already-false (assoc-in store [:elements :e1 :is_information_complete] false)
             updated (assoc (get-in already-false [:elements :e1]) :is_information_complete true)
             {:keys [effects]} (store/element-updated already-false updated)]
-        (is (not (some #(= :amber-border-rendered (:type %)) effects)))))))
+        (is (not (some #(= :incomplete-border-rendered (:type %)) effects)))))))
 
 (deftest element-deletion-cascades-test
   (testing "rules ElementDeletionAnimates + DeletionCleansConnections: placements and

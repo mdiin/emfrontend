@@ -130,7 +130,7 @@
   (when (becomes? (:is_information_complete prior-element)
                    (:is_information_complete element)
                    false)
-    {:type :amber-border-rendered :element element}))
+    {:type :incomplete-border-rendered :element element}))
 
 (defn element-created
   "rule ElementCreationAnimates (+ IncompleteElementMarked on arrival)."

@@ -180,7 +180,7 @@ entity Element {
   context: ElementContext
 
   -- True iff every field on the element is sourced (carried, derived, or
-  -- introduced). When false, the card renders a persistent amber border and
+  -- introduced). When false, the card renders a persistent red border and
   -- a hover tooltip listing the unsourced fields.
   --   CARRIED    - some incoming connection's from-element has a field with
   --                the same name; or
@@ -701,11 +701,11 @@ rule InteractionEndFlushesQueue {
 
 -- == Visual marking and tracing =============================================
 
--- An element whose information is incomplete renders a persistent amber
+-- An element whose information is incomplete renders a persistent red
 -- border (not only on hover).
 rule IncompleteElementMarked {
   when: element: Element.is_information_complete becomes false
-  ensures: AmberBorderRendered(element: element)
+  ensures: IncompleteBorderRendered(element: element)
 }
 
 -- Filtering to a timeline hides all other timeline tables and shows the
