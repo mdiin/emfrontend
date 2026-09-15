@@ -272,9 +272,13 @@
                             {:entity :change :data} changes to apply atomically
      (on-invalid raw)       a payload that failed to parse/validate
    Never returns under normal operation; only settles once the state
-   reaches the terminal :error -- reachable only after max-attempts
-   CONSECUTIVE failed connection attempts (a successful :connected resets
-   the count), never merely cumulative over the process's lifetime."
+   reaches :error -- reachable only after max-attempts CONSECUTIVE failed
+   connection attempts (a successful :connected resets the count), never
+   merely cumulative over the process's lifetime. :error is terminal only
+   until the viewer retries: a retry is a fresh call to connect!, which
+   builds its own http Client and Completer and starts again from
+   :connecting (rule RetryRestartsConnection, the `error -> connecting`
+   edge of SSEConnection's transitions state {} block)."
   [stream-url on-sse-state on-snapshot on-delta on-invalid]
   (loop [attempt 0]
     (on-sse-state (if (zero? attempt) :connecting :reconnecting))

@@ -92,6 +92,30 @@
           {:keys [effects]} (store/set-sse-state store :error)]
       (is (= [] effects)))))
 
+(deftest retry-restarts-connection-test
+  (testing "rule RetryRestartsConnection: retrying from :error moves the connection
+            back to :connecting, and deliberately leaves the Visualization in
+            :error so the overlay stays up until recovery actually succeeds"
+    (let [store (store-with-snapshot)
+          {store :store} (store/set-sse-state store :error)
+          {:keys [store effects]} (store/retry-stream store)]
+      (is (= :connecting (get-in store [:sse-connection :state])))
+      (is (= :error (get-in store [:visualization :state])))
+      (is (= [] effects) "no effects: the retry is a pure state move")))
+  (testing "the requires guard is the single-in-flight guard: a retry that arrives
+            once the state has moved on changes nothing"
+    (let [store (assoc-in (store-with-snapshot) [:sse-connection :state] :connecting)
+          {:keys [store effects]} (store/retry-stream store)]
+      (is (= :connecting (get-in store [:sse-connection :state])))
+      (is (= [] effects))))
+  (testing "the recovered path is real: a retry followed by the fresh snapshot
+            drives Visualization error -> loading -> rendered"
+    (let [store (store-with-snapshot)
+          {store :store} (store/set-sse-state store :error)
+          {store :store} (store/retry-stream store)
+          {:keys [store]} (store/snapshot-received store snapshot-with-timeline)]
+      (is (= :rendered (get-in store [:visualization :state]))))))
+
 ;; == Element deltas ============================================================
 
 (deftest element-creation-animates-test

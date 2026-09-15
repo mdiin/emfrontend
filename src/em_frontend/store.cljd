@@ -109,6 +109,19 @@
        :effects [{:type :error-overlay-shown :connection (:sse-connection store')}]}
       {:store store' :effects []})))
 
+(defn retry-stream
+  "rule RetryRestartsConnection: the viewer's manual retry after a stream
+   failure. Only the connection moves (error -> connecting); the
+   Visualization is deliberately left in :error -- the overlay must stay up
+   until the fresh snapshot reseeds the store via `snapshot-received`, which
+   is what makes Visualization's `error -> loading` transition real rather
+   than cosmetic. Guarded on :error, so a retry that arrives once the state
+   has already moved on is a no-op: at most one connection attempt in flight."
+  [store]
+  (if (= :error (get-in store [:sse-connection :state]))
+    {:store (assoc-in store [:sse-connection :state] :connecting) :effects []}
+    {:store store :effects []}))
+
 ;; == Element deltas ==========================================================
 
 (defn- incomplete-marking-effect

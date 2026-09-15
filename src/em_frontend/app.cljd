@@ -43,7 +43,9 @@
    one-shot effects rather than stored fields (see em-frontend.interaction's
    select-field-for-trace docstring). InvalidDataIndicatorShown is folded in
    the same way, into :invalid-data, so rule InvalidDataVisible's payload is
-   surfaced rather than silently dropped.
+   surfaced rather than silently dropped. ErrorOverlayShown is folded in as
+   :failed-connection, and cleared again by the next :store-seeded -- a
+   successful recovery is exactly a reseed from a fresh snapshot.
 
    Animation effects (ElementAppears/ElementDisappears, TimelineAppears/
    TimelineDisappears) seed the alpha/opacity maps in ui-atom; the shared
@@ -57,6 +59,7 @@
       :connection-dimmed (swap! ui-atom assoc-in [:connection-visual (:connection fx)] :dimmed)
       :field-flow-trace-cleared (swap! ui-atom assoc :connection-visual {})
       :invalid-data-indicator-shown (swap! ui-atom assoc :invalid-data (:delta fx))
+      :error-overlay-shown (swap! ui-atom assoc :failed-connection (:connection fx))
       :element-appears
         (let [eid (:id (:element fx))]
           (swap! ui-atom
@@ -85,8 +88,37 @@
                :element-target-alphas {}
                :element-current-alphas {}
                :fading-out-timelines #{}
-               :timeline-target-opacities {})
+               :timeline-target-opacities {}
+               ;; a successful reconnect/retry reseeds from a fresh snapshot,
+               ;; so there is no failed connection left to report
+               :failed-connection nil)
       nil)))
+
+;; == Starting (and restarting) the stream ====================================
+
+(defn- start-stream!
+  "Starts the SSE driver, wiring stream/connect!'s four callbacks onto
+   store-atom/ui-atom through apply-outcome!. Hoisted out of `root` so the
+   same wiring can be invoked again for a manual retry: connect! builds its
+   own http Client and Completer per call, so a second call is an independent
+   driver, not a resumption of the failed one."
+  [store-atom ui-atom]
+  (stream/connect! stream-url
+    (fn [s] (apply-outcome! store-atom ui-atom (store/set-sse-state @store-atom s)))
+    (fn [seed] (apply-outcome! store-atom ui-atom (store/snapshot-received @store-atom seed)))
+    (fn [changes] (apply-outcome! store-atom ui-atom (store/ingest-delta @store-atom changes)))
+    (fn [raw] (apply-outcome! store-atom ui-atom (store/invalid-delta-received @store-atom raw)))))
+
+(defn- retry-stream!
+  "rule RetryRestartsConnection, driven by the error banner's Retry button:
+   apply the pure retry action, then start the stream again -- but only when
+   the connection really was :error. The retry moves it straight to
+   :connecting, so a second invocation (or a double click) sees :connecting
+   and starts nothing: at most one connection attempt is ever in flight."
+  [store-atom ui-atom]
+  (when (= :error (get-in @store-atom [:sse-connection :state]))
+    (apply-outcome! store-atom ui-atom (store/retry-stream @store-atom))
+    (start-stream! store-atom ui-atom)))
 
 ;; == Canvas: per-timeline hit-testing + the whole-canvas InteractiveViewer ===
 
@@ -256,12 +288,20 @@
 
 ;; == Overlays: field-flow banner, error banner, selection panels ============
 
-(defn- error-banner []
+(defn- error-banner
+  "rules ErrorStateShowsMessage / RetryRestartsConnection: the failed-state
+   overlay. The canvas stays mounted behind it (see overlay-stack), so Retry
+   restarts the stream without losing what is already drawn."
+  [{:keys [on-retry]}]
   (m/Material
     .color m/Colors.red.shade50
     .elevation 2.0
     .child (m/Padding .padding (m/EdgeInsets.all 8.0)
-             .child (m/Text "Stream connection lost -- last known state shown below."))))
+             .child (m/Row
+                      .mainAxisSize m/MainAxisSize.min
+                      .children
+                      [(m/Text "Stream connection lost -- last known state shown below.")
+                       (m/TextButton .onPressed (fn [] (on-retry) nil) .child (m/Text "Retry"))]))))
 
 (defn- invalid-data-banner
   "rule InvalidDataVisible: the rest of the store is left intact, this is
@@ -289,7 +329,9 @@
          (m/Center .child (m/CircularProgressIndicator)))
 
        (when (= (get-in st [:visualization :state]) :error)
-         (m/Align .alignment m/Alignment.topCenter .child (error-banner)))
+         (m/Align .alignment m/Alignment.topCenter
+           .child (error-banner
+                    {:on-retry (fn [] (retry-stream! store-atom ui-atom))})))
 
        (when (:invalid-data ui)
          (m/Align .alignment m/Alignment.bottomLeft
@@ -409,6 +451,7 @@
     :managed [store-atom (atom (store/initial-store)) :dispose nil]
     :managed [ui-atom (atom {:connection-visual {} :selected-element nil
                              :selected-connection nil :expanded-slices #{} :hovered-element nil
+                             :failed-connection nil
                              :element-target-alphas {} :element-current-alphas {}
                              :fading-out-timelines #{} :timeline-target-opacities {}})
               :dispose nil]
@@ -420,11 +463,7 @@
                                   .duration (Duration .milliseconds config/animation-duration-ms))
                             (.addListener (fn [] (swap! ui-atom step-element-alphas)))
                             (.repeat))]
-    :managed [_ (stream/connect! stream-url
-                  (fn [s] (apply-outcome! store-atom ui-atom (store/set-sse-state @store-atom s)))
-                  (fn [seed] (apply-outcome! store-atom ui-atom (store/snapshot-received @store-atom seed)))
-                  (fn [changes] (apply-outcome! store-atom ui-atom (store/ingest-delta @store-atom changes)))
-                  (fn [raw] (apply-outcome! store-atom ui-atom (store/invalid-delta-received @store-atom raw))))
+    :managed [_ (start-stream! store-atom ui-atom)
               :dispose nil]
     :watch [st store-atom]
     :watch [ui ui-atom]

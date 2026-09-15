@@ -316,7 +316,10 @@ entity SSEConnection {
     connecting -> reconnecting  -- first attempt fails; backoff retry begins
     connected -> reconnecting
     reconnecting -> connected
-    reconnecting -> error       -- max retries exhausted; error is terminal
+    reconnecting -> error       -- max retries exhausted; terminal until the
+                                -- viewer retries
+    error -> connecting         -- the viewer retries; a fresh connection
+                                -- attempt begins
   }
 }
 
@@ -403,6 +406,20 @@ rule ErrorStateShowsMessage {
   ensures:
     viz.state = error
     ErrorOverlayShown(connection: connection)
+}
+
+-- The viewer's manual retry after a stream failure: a fresh connection attempt
+-- begins. The visualization is deliberately left in its error state -- the
+-- snapshot of the *successful* retry is what reseeds the store and drives
+-- `error -> loading`, so the overlay stays up until recovery actually happens.
+-- Because a successful retry moves the connection out of error, this
+-- `requires` is also the single-in-flight guard: while an attempt is starting
+-- a second retry cannot fire, so at most one connection is ever in flight.
+rule RetryRestartsConnection {
+  when: RetryStream(viewer, viz)
+  let connection = SSEConnection
+  requires: connection.state = error
+  ensures: connection.state = connecting
 }
 
 -- == Delta application: animation, layout and re-render =====================
@@ -940,6 +957,23 @@ surface FieldFlowTrace {
 
   provides:
     ClearFieldFlowTrace(viewer, viz)
+}
+
+-- Error overlay shown over the visualization when the stream connection
+-- fails: it names the visualization's failed state and offers the one way
+-- out. The last rendered canvas stays visible behind it -- a failed stream is
+-- no reason to throw away what was already drawn -- and a retry restarts the
+-- connection without clearing it, so the overlay only goes away once a fresh
+-- snapshot has actually reseeded the store.
+surface StreamErrorOverlay {
+  facing viewer: Viewer
+  context viz: Visualization where state = error
+
+  exposes:
+    viz.state
+
+  provides:
+    RetryStream(viewer, viz)
 }
 
 -- The stream-ingest boundary: the entry point through which the emcli SSE
