@@ -919,6 +919,7 @@ surface SpecificationExpanded {
         step.index
         step.element
         step.is_error
+        step.error_name
         step.expect_empty
         for ex in step.examples:
           ex.field_name
