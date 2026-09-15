@@ -205,7 +205,7 @@ entity Element {
   -- Optional swimlane assignment. Absent means the default unnamed band.
   swimlane: Swimlane?
 
-  -- Optional screen image; when present, screen cards show it as a thumbnail.
+  -- Optional screen image; when present, it is shown in the element details panel.
   image_url: String?
 
   placements: Placement with element = this
@@ -225,8 +225,9 @@ entity Element {
     and name not in derived_field_names
 
   -- Fields shown directly on the canvas card, but only for the kinds whose
-  -- fields matter there: command, event and read_model. Screens show an image
-  -- thumbnail and automations have no fields of their own, so both yield none.
+  -- fields matter there: command, event and read_model. A screen's card is
+  -- given over to its wireframe and automations have no fields of their own,
+  -- so both yield none.
   canvas_fields: if kind in {command, event, read_model}: fields else: {}
 }
 
