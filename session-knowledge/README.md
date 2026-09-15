@@ -11,7 +11,7 @@ diagnostics misleading, and the conventions earlier sessions settled.
 
 | File | Contents |
 |------|----------|
-| `2026-09-15-spec-code-weed.md` | Read-only weed pass over the uncommitted reload change: `DIRTY` verdict with `allium check` at baseline (3 warnings / 2 infos at lines 37/40/40/139/258, exit 1), the reload change verified (store action matches `ReloadRestartsConnection`; the reseed rides `SnapshotReceived` / `ReconnectPreservesViewport`; the driver lifecycle is outside the spec's vocabulary and invisible to the checker), five class-A divergences — A1 (undeclared `reconnecting -> connecting`) and A2 (`retry-stream!` discarding its driver handle, leaving two live drivers) **FIXED code-side**, A3 (wireframe node shape / `screen` vs `canvas` root), A4 (`Element.is_information_complete` derived-vs-stored provenance, needs a human decision) and A5 (test fixtures drifted from the wire examples they claim to copy) **OPEN** (of these, A4 and A5 were closed later the same day — see the closure note in that file; A3 remains open) — nine class-B coverage gaps, six class-C items confirmed intentional with the three grey-box causes still deferred, and an ordered action list. |
+| `2026-09-15-spec-code-weed.md` | Read-only weed pass over the uncommitted reload change: `DIRTY` verdict with `allium check` at baseline (3 warnings / 2 infos at lines 37/40/40/139/258, exit 1), the reload change verified (store action matches `ReloadRestartsConnection`; the reseed rides `SnapshotReceived` / `ReconnectPreservesViewport`; the driver lifecycle is outside the spec's vocabulary and invisible to the checker), five class-A divergences — A1 (undeclared `reconnecting -> connecting`) and A2 (`retry-stream!` discarding its driver handle, leaving two live drivers) **FIXED code-side**, A3 (wireframe node shape / `screen` vs `canvas` root), A4 (`Element.is_information_complete` derived-vs-stored provenance, needs a human decision) and A5 (test fixtures drifted from the wire examples they claim to copy) **OPEN** (of these, A4, A5 **and A3** were all closed later the same day — see the closure notes in that file; the row's "A3 remains open" is kept as written, and **no class-A divergence is open now**) — nine class-B coverage gaps, six class-C items confirmed intentional with the three grey-box causes still deferred, and an ordered action list. |
 | `2026-09-15-model-reload-button.md` | Manual model reload session: the viewer-invoked `ReloadModel` capability on `surface Viewport` and the `ReloadRestartsConnection` rule (a fresh connection forced from `connected -> reconnecting`, reusing the existing reseed path), the product decision that reload refreshes the model and not the view (zoom, pan, timeline filter and field-flow highlight preserved), the stream driver's new cancellation handle (`drive-stream!` / `connect!` returning `{:cancel ...}` / `disconnect!`), `98: All tests passed!` with the `allium check` diagnostic set unchanged, and the three grey-box delta-bug causes deliberately deferred in favour of the reload button. |
 | `2026-09-15-spec-code-alignment.md` | Spec/code alignment session: the expected `allium check` baseline, two checker quirks verified with probes on Allium 3.6.0, conventions settled, gaps deliberately left in place, and the per-change verification workflow. |
 
@@ -25,6 +25,9 @@ diagnostics misleading, and the conventions earlier sessions settled.
 
 ## Not part of the project
 
-`.clj-kondo/`, `.lsp/` and `NOTES.md` at the repository root are untracked
-local scratch entries. They are **not** part of this project and must not be
-committed. Never use `git add -A` or `git add .` in this repository.
+`.clj-kondo/`, `.lsp/`, `.dirge/` and `NOTES.md` at the repository root are
+untracked local scratch entries. They are **not** part of this project and must
+not be committed. Never use `git add -A` or `git add .` in this repository.
+(`.dirge/skills/emfrontend-architecture/SKILL.md` is a local architecture note
+that sessions occasionally correct — it is gitignored, so those corrections
+never reach a commit and must not be relied on as project documentation.)

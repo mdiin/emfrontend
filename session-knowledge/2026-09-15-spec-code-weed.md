@@ -415,6 +415,76 @@ Re-checked against the current tree; all still as previously recorded. **Do not
 > recorded baseline did not move (and the A3 wireframe fixture was deliberately
 > left untouched).
 
+> **2026-09-15 — A3 closed.** Section 2's A3 and section 5's item 3 are now
+> resolved, so **no class-A divergence remains open**. The fix is code- and
+> fixture-side; `em-frontend.allium` was **not touched**.
+>
+> - **The shape.** `norm-wireframe-node` (`src/em_frontend/stream.cljd:58-89`)
+>   now reads the schema's `[tag-str, id-map, attrs-map?, ...children]`: the id
+>   map is the second slot and is dropped, attrs are read from the optional map
+>   directly after it, and the attribute map can no longer be mistaken for a
+>   child node. The three consequences section 2 listed are each addressed:
+>   attrs arrive (so `draw-wf-overlays` can fire), no garbage child is
+>   synthesised, and the root tag is recognised.
+> - **The root tag.** `draw-wf-node` (`src/em_frontend/canvas.cljd`) now
+>   dispatches on `:canvas` instead of `:screen`; `:screen` survives only as an
+>   *element kind* (`canvas.cljd:319`, `layout.cljd:63`, `:110`), which is a
+>   different thing and stays.
+> - **The load-bearing gotcha.** The attrs slot is told apart with
+>   `(dart/is? slot dart:core/Map)`, **not** `map?`: ClojureDart defines `map?`
+>   as `(satisfies? IMap x)`, which is false for a JSON object decoded by
+>   `dart:convert`, so `map?` silently drops *every* attrs map on the wire (and
+>   turns it into a child). This is not theory — the first version of the fix
+>   used `map?` and `normalize-wireframe-delta-test` failed on
+>   `(= {:gap "md"} {})`. ClojureDart's own `keys`/`vals` use the same Dart type
+>   test for the same reason. The docstring records this so it is not
+>   "simplified" back.
+> - **The fixtures now guard the wire.** `delta-add-wireframe`
+>   (`test/em_frontend/stream_test.cljd`) is no longer hand-built: its subtree is
+>   emcli's own output, produced with `emcli.wireframe/append-child-at`,
+>   `assoc-attr-at` and `set-text-child-at` and serialized by the same cheshire
+>   the SSE server uses (`emcli.wireframe/validate` reports `{:valid? true}`).
+>   The regeneration command is recorded above the fixture, which carries all
+>   four slot combinations — root without attrs, container with attrs *before*
+>   its children, a text-children node whose string follows the id map, and a
+>   leaf whose attrs map is last. `snapshot-with-wireframe` and
+>   `layout_test.cljd`'s normalized `screen-el` moved to the `:canvas` root too.
+> - **By-product found while fixing.** The overlay branches of `draw-wf-node`
+>   are only reached by non-container tags, so a `:col`/`:row` carrying
+>   `field-name` (legal in the DSL; the spec's `wf_field_overlay_names` walks
+>   *every* node, and `draw-wf-overlays`' own docstring said "regardless of
+>   tag") would never have tinted. Those two branches now draw their overlay
+>   when they carry attrs. `:canvas` cannot: the DSL gives it no attributes.
+> - **The thecli flag (item 3's other half) is satisfied by that repo.**
+>   `../thecli/docs/change-stream.md:253` now reads
+>   `[tag, id-map, attrs?, ...children]` with the root "always `canvas`",
+>   agreeing with `change-stream.schema.json` (`$defs/WireframeNode`) and
+>   `wireframe.clj`'s `:canvas`-root validation. Those edits are in thecli's
+>   **working tree, not committed there** (its commit `907408d` is the last one
+>   that touched the schema). The doc's old merged-attrs prose is what
+>   `em-frontend`'s code and tests had been shaped around.
+> - **Residual, recorded not fixed — nested container height.** `wf-node-height`
+>   has no entry for `:canvas`/`:col`/`:row`, so a container nested inside
+>   another is given the 20.0 default height and its children overflow into the
+>   sibling below. Now that real trees render at all, this is visible; it is
+>   renderer geometry the spec explicitly disclaims (as are per-tag heights), a
+>   *different* defect from the shape, and fixing it means designing
+>   intrinsic-height layout — out of A3's scope.
+>
+> Verification (all four, in order): `clj -M:cljd:test test` exit 0 with
+> `+109: All tests passed!` (same count as the B2 note: assertions moved, no
+> test added or removed; both wireframe deftests appear in the run), the same
+> command with `map?` reinstated **fails** — so the changed assertions are
+> load-bearing — `clj -M:cljd clean && clj -M:cljd compile` exit 0 (the
+> pre-existing `listen`-on-dynamic warning inside `drive-stream!` only, and the
+> AGENTS.md cross-import gotcha therefore cleared before analysis),
+> `/home/mvi/.local/bin/allium check em-frontend.allium` exit 1 with the
+> unchanged five diagnostics at 37/40/40/139/258 (the spec is untouched, so the
+> baseline did not move), and `flutter analyze` 13 pre-existing issues, **none**
+> in `stream.dart`/`canvas.dart` — the new `dart/is?` compiles clean. The
+> painter still has no test (unchanged policy, see e.4/B4); the coverage is the
+> normalization, which is where the divergence was.
+
 ---
 
 ## Follow-up pointers
@@ -430,5 +500,9 @@ Re-checked against the current tree; all still as previously recorded. **Do not
 - Treat A3 as the highest-value open item: it silently kills the field-name
   overlay and mis-renders every real screen wireframe, and the passing tests do
   not notice because they encode the same wrong shape as the code.
+  **[Annotated 2026-09-15: A3 is now closed — see the closure note above; the
+  claim above is kept as written. What replaces it as the trap in this area is
+  `map?` vs `dart/is?`, recorded in that closure note and in
+  `norm-wireframe-node`'s docstring.]**
 - Section 4's items are **confirmed intentional**. Do not "fix" them
   opportunistically; e.4 in particular does not cover A3.
