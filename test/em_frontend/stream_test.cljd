@@ -180,3 +180,37 @@
     (testing "h1 text child intact through snapshot normalization"
       (is (= :h1 (get-in wf [:children 0 :tag])))
       (is (= "Hello" (get-in wf [:children 0 :children 0]))))))
+
+;; == Driver lifecycle =========================================================
+;; The connection itself (http/Client, Completer, StreamSubscription,
+;; Future/delayed) is outside what cljd.test can reach: it needs a live
+;; socket and an async seam, so it stays an accepted gap. What IS reachable is
+;; the policy the loop runs -- `retry-decision`, extracted from
+;; `drive-stream!` for exactly this reason -- and `disconnect!`'s contract
+;; against a fabricated handle.
+
+(deftest disconnect-contract-test
+  (testing "nil is a no-op (a caller need not track whether the driver is live)"
+    (is (nil? (stream/disconnect! nil))))
+  (testing "a handle's :cancel fn is invoked, exactly once"
+    (let [calls (atom 0)]
+      (stream/disconnect! {:cancel (fn [] (swap! calls inc))})
+      (is (= 1 @calls)))))
+
+(deftest retry-decision-policy-test
+  (testing "the first failed attempt retries as attempt 1 after the initial backoff"
+    (is (= {:attempt 1 :delay-ms 500} (stream/retry-decision 0 false))))
+  (testing "the delay doubles per attempt, then caps at max-backoff-ms
+            (backoff-ms(a) = min(30000, 500 * 2^a), so attempt 6 is capped)"
+    (is (= [1000 2000 4000 8000 16000 30000]
+           (mapv #(:delay-ms (stream/retry-decision % false)) (range 1 7)))))
+  (testing "reaching :connected resets the count to 0, whatever the attempt
+            number -- so :error is never merely cumulative"
+    (is (= {:attempt 1 :delay-ms 500} (stream/retry-decision 5 true)))
+    (is (= {:attempt 1 :delay-ms 500} (stream/retry-decision 3 true))))
+  (testing "attempt 7 exhausts max-attempts: :error, never another retry"
+    (is (= {:state :error} (stream/retry-decision 7 false))))
+  (testing "the cap holds: no :delay-ms ever exceeds max-backoff-ms"
+    (is (every? #(<= (:delay-ms %) 30000)
+                (keep #(when-not (:state %) %) (map #(stream/retry-decision % false)
+                                                    (range 0 8)))))))

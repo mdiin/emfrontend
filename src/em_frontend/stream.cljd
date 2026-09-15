@@ -263,6 +263,22 @@
 (defn- ^double backoff-ms [attempt]
   (.toDouble (min max-backoff-ms (* initial-backoff-ms (math/pow 2 attempt)))))
 
+(defn retry-decision
+  "Pure retry policy for `drive-stream!`, split out so `cljd.test` can exercise
+   it without the async loop. Given the attempt number just failed and whether
+   that attempt had reached :connected, returns {:attempt n :delay-ms ms} to
+   wait `ms` and retry as attempt `n`, or {:state :error} once `max-attempts`
+   CONSECUTIVE attempts have failed. A connection that reached :connected resets
+   the count to 0, so :error is never merely cumulative. Public, like the
+   normalizers, as a test seam."
+  [attempt reached-connected?]
+  (let [base-attempt (if reached-connected? 0 attempt)
+        next-attempt (inc base-attempt)]
+    (if (>= next-attempt max-attempts)
+      {:state :error}
+      {:attempt next-attempt
+       :delay-ms (.round (backoff-ms base-attempt))})))
+
 (defn- ^:async drive-stream!
   "The connection + backoff loop behind `connect!`, run in the background.
    Reconnects with exponential backoff on drop, per SSEConnection's
@@ -333,13 +349,12 @@
           ;; A dropped connection always retries; `error` is reached only once
           ;; max-attempts CONSECUTIVE attempts have failed, so any connection
           ;; that got as far as :connected resets the count back to 0.
-          (let [base-attempt (if @connected? 0 attempt)
-                next-attempt (inc base-attempt)]
-            (if (>= next-attempt max-attempts)
+          (let [decision (retry-decision attempt @connected?)]
+            (if (= :error (:state decision))
               (on-sse-state :error)
               (do
-                (await (Future/delayed (Duration .milliseconds (.round (backoff-ms base-attempt)))))
-                (recur next-attempt)))))))))
+                (await (Future/delayed (Duration .milliseconds (:delay-ms decision))))
+                (recur (:attempt decision))))))))))
 
 (defn connect!
   "Opens `stream-url`, drives it in the background and returns that driver's

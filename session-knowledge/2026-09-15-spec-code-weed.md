@@ -359,6 +359,62 @@ Re-checked against the current tree; all still as previously recorded. **Do not
 > - **`animation-duration-ms`: recorded as a renderer timing constant.** No spec counterpart by design -- the spec names the Appears/Disappears effects, not their duration -- and the animation rules now carry the same "renderer constant" disclaimer as the layout geometry.
 > - By-products found, recorded not fixed: `:error-overlay-shown` reaches `ui-atom`'s `:failed-connection` which nothing reads (the banner keys off the store's `:visualization :state`), and `next_delta` has the same callback-shaped mismatch as `connect`.
 
+> **2026-09-15 — B2 partly resolved (a bounded pure extraction).** B2 moves from
+> "left unhandled by decision" to **partly resolved** -- approach B: extract the
+> pure retry policy, cover it, and record the rest as an accepted gap.
+> - **The retry policy is now a pure, public seam.** `retry-decision`
+>   (`src/em_frontend/stream.cljd`, placed immediately after the still-private
+>   `backoff-ms`) takes `[attempt reached-connected?]` and returns
+>   `{:attempt n :delay-ms ms}` or `{:state :error}`; `drive-stream!`'s loop tail
+>   now calls it instead of inlining `base-attempt`/`next-attempt`. No behaviour
+>   change, and the "max-attempts CONSECUTIVE" comment moved with it. Public,
+>   like the normalizers, for exactly this reason -- and `backoff-ms` is thus
+>   reachable for tests *through* it (its `:delay-ms`), while staying private.
+> - **The backoff shape is covered** by `retry-decision-policy-test`
+>   (`test/em_frontend/stream_test.cljd`): attempt 0 -> `{:attempt 1 :delay-ms
+>   500}`; attempts 1-6 -> 1000/2000/4000/8000/16000/30000 (capped from attempt 6
+>   on, since `backoff-ms(a) = min(30000, 500 * 2^a)`); `reached-connected?`
+>   resets to `{:attempt 1 :delay-ms 500}` whatever the attempt number; attempt 7
+>   -> `{:state :error}` (never another retry); and the cap holds for every
+>   attempt -- no `:delay-ms` exceeds the 30 s maximum.
+> - **`disconnect!`'s contract is covered** by `disconnect-contract-test`: nil is
+>   a no-op, and a handle's `:cancel` fn is invoked exactly once. Note this is
+>   the *reachable* part of the A2 interface only -- it does not guard A2's bug
+>   (two live drivers), which needs the injection seam below.
+>
+> **Accepted gap (unchanged).** The HTTP/async plumbing *inside* `drive-stream!`
+> -- `http/Client`, `Completer`, `StreamSubscription`, `Future/delayed` -- stays
+> untested. B2's original wording in section 3 is still true of that layer:
+> there is no async/HTTP harness.
+>
+> **Why approach C was declined.** The natural seam (a `connect-fn`/clock
+> injection threaded through `app.cljd`) was ruled **out of scope** for this
+> work. The obstacle, recorded for a future session: ClojureDart has no
+> `with-redefs`/`alter-var-root`, so `app.cljd`'s private `reload-model!` /
+> `retry-stream!` are unreachable from `cljd.test` without a `connect-fn`
+> parameter -- and a spike showed async does not rescue it (below).
+>
+> **A load-bearing negative: an async `deftest` body here cannot fail.** The
+> work began with a throwaway spike (a `deftest` that `await`s a `Future/delayed`
+> inside the body). It did **not** come back clean. The pinned ClojureDart
+> compiler does auto-promote a `fn` containing `await` to async, and a *passing*
+> post-`await` assertion ran -- but a *failing* assertion after an `await` was
+> reported as a **30 s `TimeoutException`** ("Test timed out after 30 seconds"),
+> not as a failed assertion. An async test in this toolchain can therefore
+> silently never fail, which makes it useless as a gate. That is why no
+> `connect!`-driving test was added, and why the async half of the reload path
+> stays an accepted gap rather than an easy future win. Both spike tests were
+> deleted; nothing from them remains in the suite.
+>
+> Verification (all three, in order): `clj -M:cljd:test test` exit 0 with
+> `+109: All tests passed!` (was 107; both new deftests appear in the run),
+> `clj -M:cljd clean && clj -M:cljd compile` exit 0 (`All clear!`, plus the
+> pre-existing `listen`-on-dynamic warning inside `drive-stream!`), and
+> `/home/mvi/.local/bin/allium check em-frontend.allium` exit 1 with the same
+> five diagnostics at lines 37/40/40/139/258. The spec was not touched, so the
+> recorded baseline did not move (and the A3 wireframe fixture was deliberately
+> left untouched).
+
 ---
 
 ## Follow-up pointers
