@@ -366,7 +366,7 @@
                {:element element
                 :swimlane-name (get-in st [:swimlanes (:swimlane element) :name])
                 :on-select-field
-                (fn [field-name] (apply-outcome! store-atom ui-atom (interaction/select-field-for-trace @store-atom field-name)))
+                (fn [field-name] (apply-outcome! store-atom ui-atom (interaction/select-field-for-trace @store-atom eid field-name)))
                 :on-close (fn [] (swap! ui-atom assoc :selected-element nil))}))))
 
        (when-some [cid (:selected-connection ui)]

@@ -125,19 +125,83 @@
 
 ;; == FieldFlowTrace surface ====================================================
 
+;; Two paths carry "total" into :dst -- one carried through :mid (a chain) and
+;; one derived from an element that INTRODUCES "amount" via a FieldOrigin --
+;; plus a disconnected component (:other -> :elsewhere) that mentions the same
+;; field names but has no path into :dst. :c4 carries "amount" into :intro, the
+;; element where the value originates.
+(defn- trace-store []
+  {:elements {:src {:id :src :name "Source" :fields [{:name "amount"}]}
+              :mid {:id :mid :name "Mid" :fields [{:name "amount"}]}
+              :dst {:id :dst :name "Dest" :fields [{:name "total"}]}
+              :other {:id :other :name "Other" :fields [{:name "amount"}]}
+              :elsewhere {:id :elsewhere :name "Elsewhere" :fields [{:name "total"}]}
+              :intro {:id :intro :name "Intro" :fields [{:name "amount"}]
+                      :field_origins [{:field "amount" :origin :user_input}]}
+              :feed {:id :feed :name "Feed" :fields [{:name "amount"}]}}
+   :connections {:c1 {:id :c1 :from :src :to :mid :derivations []}
+                 :c2 {:id :c2 :from :mid :to :dst
+                      :derivations [{:target_field "total" :source_fields ["amount"]}]}
+                 :c3 {:id :c3 :from :other :to :elsewhere
+                      :derivations [{:target_field "total" :source_fields ["amount"]}]}
+                 :c4 {:id :c4 :from :feed :to :intro :derivations []}
+                 :c5 {:id :c5 :from :intro :to :dst
+                      :derivations [{:target_field "total" :source_fields ["amount"]}]}}
+   :visualization {:highlighted_path #{}}})
+
+(defn- highlighted [effects]
+  (into #{} (comp (filter #(= :connection-highlighted (:type %))) (map :connection)) effects))
+
+(defn- dimmed [effects]
+  (into #{} (comp (filter #(= :connection-dimmed (:type %))) (map :connection)) effects))
+
 (deftest field-flow-highlights-test
-  (testing "rule FieldFlowHighlights: connections carrying the field forward or
-            backward are highlighted, the rest dimmed; highlighted_path
-            records every on-path connection's endpoints"
-    (let [{:keys [store effects]} (interaction/select-field-for-trace (base-store) "x")]
-      (is (= #{:e1 :e2} (get-in store [:visualization :highlighted_path])))
-      (is (some #(and (= :connection-highlighted (:type %)) (= :c1 (:connection %))) effects))
-      (is (some #(and (= :connection-dimmed (:type %)) (= :c2 (:connection %))) effects))))
+  (testing "rule FieldFlowHighlights: the connections carrying the field INTO
+            the selected element are highlighted, transitively upstream --
+            carried through :mid (c1 then c2) and derived from the value's
+            origin (c5); highlighted_path records every on-path endpoint"
+    (let [{:keys [store effects]} (interaction/select-field-for-trace (trace-store) :dst "total")]
+      (is (= #{:src :mid :intro :dst} (get-in store [:visualization :highlighted_path])))
+      (is (= #{:c1 :c2 :c5} (highlighted effects)))
+      (is (= #{:c3 :c4} (dimmed effects)))))
+  (testing "a disconnected component that shares the traced field name has no
+            path into the element, so it is not highlighted"
+    (let [{:keys [store effects]} (interaction/select-field-for-trace (trace-store) :dst "total")]
+      (is (not (contains? (highlighted effects) :c3))
+          ":other -> :elsewhere derives the same field name, but elsewhere")
+      (is (not (contains? (get-in store [:visualization :highlighted_path]) :other)))
+      (is (not (contains? (get-in store [:visualization :highlighted_path]) :elsewhere)))
+      (is (contains? (dimmed effects) :c3)))))
+
+(deftest field-flow-highlights-introduced-field-test
+  (testing "a field introduced at the element via a FieldOrigin yields an empty
+            trace: the value originates here, so even the connection carrying a
+            same-named field into the element is not part of a traced path"
+    (let [{:keys [store effects]} (interaction/select-field-for-trace (trace-store) :intro "amount")]
+      (is (= #{} (get-in store [:visualization :highlighted_path])))
+      (is (= #{} (highlighted effects)))
+      (is (= 5 (count effects)))
+      (is (every? #(= :connection-dimmed (:type %)) effects)))))
+
+(deftest field-flow-highlights-unknown-field-test
   (testing "a field carried by no connection's derivations highlights nothing, dims everything"
-    (let [{:keys [store effects]} (interaction/select-field-for-trace (base-store) "no-such-field")]
+    (let [{:keys [store effects]} (interaction/select-field-for-trace (trace-store) :dst "no-such-field")]
       (is (= #{} (get-in store [:visualization :highlighted_path])))
       (is (every? #(= :connection-dimmed (:type %)) effects))
-      (is (= 2 (count effects))))))
+      (is (= 5 (count effects))))))
+
+(deftest field-flow-highlights-cycle-terminates-test
+  (testing "a cross-timeline cycle terminates: each (element, field) pair is
+            expanded at most once, so the frontier empties"
+    (let [store {:elements {:a {:id :a :name "A" :fields [{:name "amount"}]}
+                            :b {:id :b :name "B" :fields [{:name "amount"}]}}
+                 :connections {:ab {:id :ab :from :a :to :b :derivations []}
+                               :ba {:id :ba :from :b :to :a :derivations []}}
+                 :visualization {:highlighted_path #{}}}
+          {:keys [store effects]} (interaction/select-field-for-trace store :a "amount")]
+      (is (= #{:a :b} (get-in store [:visualization :highlighted_path])))
+      (is (= #{:ab :ba} (highlighted effects)))
+      (is (= #{} (dimmed effects))))))
 
 (deftest clear-field-flow-trace-test
   (let [store (assoc-in (base-store) [:visualization :highlighted_path] #{:e1 :e2})

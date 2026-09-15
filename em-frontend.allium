@@ -743,17 +743,34 @@ rule TimelineFilterCleared {
       TimelineAppears(timeline: t)
 }
 
--- Selecting a field highlights every connection whose derivations carry that
--- field (forward: source_fields contains it; backward: target_field matches
--- it) and dims the rest. The traced path's elements are recorded on the
--- visualization.
+-- Selecting a field highlights the connections that carry that field INTO the
+-- selected element, transitively upstream, and dims every other connection in
+-- the model. The traced path's elements are recorded on the visualization.
+--
+-- connections_carrying_into(model, element, field_name) -- black box: the set
+-- of connections on the upstream path that supply field_name to `element`. A
+-- connection c SUPPLIES field name n to an element e when c.to = e and either
+--   CARRIED - c.from has a field named n, or
+--   DERIVED - c carries a FieldDerivation whose target_field is n and every
+--             name in that derivation's source_fields exists as a field name
+--             on c.from (a fully satisfied derivation).
+-- This is exactly the carried/derived notion Element.is_information_complete
+-- tests, so the two never diverge. The walk starts at (element, field_name) and
+-- continues upstream through every supplying connection: through each satisfied
+-- derivation's source_fields, and through the same field name for a same-named
+-- carrier. It stops at an element that introduces the field via a FieldOrigin
+-- -- that element is where the value originates, and it stays on the traced
+-- path. Visited (element, field) pairs bound the walk: each pair is expanded at
+-- most once, so a cycle across timelines (which ConnectionsRenderRightToLeft
+-- deliberately leaves unconstrained) still terminates.
+--
+-- trace_path_elements(on_path) -- black box: every from/to endpoint of an
+-- on-path connection, the traced elements the overlay names.
 rule FieldFlowHighlights {
   when: SelectFieldForTrace(viewer, element, field_name)
   let viz = Visualization
   let model = EventModel
-  let on_path =
-    model.connections where derivations.any(d =>
-      d.target_field = field_name or field_name in d.source_fields)
+  let on_path = connections_carrying_into(model, element, field_name)
   ensures:
     viz.highlighted_path = trace_path_elements(on_path)
     for c in on_path:
@@ -945,9 +962,10 @@ surface TimelineFilter {
     ClearTimelineFilter(viewer)
 }
 
--- Field-flow trace overlay: highlights the connections carrying the selected
--- field forward (source_fields contains it) and backward (target_field matches
--- it), dimming the rest.
+-- Field-flow trace overlay: highlights the connections that carry the selected
+-- field INTO the selected element, transitively upstream, dimming every other
+-- connection. A field introduced at the element itself yields an empty trace,
+-- so no overlay appears for it.
 surface FieldFlowTrace {
   facing viewer: Viewer
   context viz: Visualization where highlighted_path.count > 0

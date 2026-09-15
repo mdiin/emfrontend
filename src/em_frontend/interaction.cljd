@@ -5,6 +5,7 @@
    `store -> {:store :effects}` transform, same shape as em-frontend.store's
    rule functions."
   (:require [em-frontend.config :as config]
+            [em-frontend.model :as model]
             [em-frontend.store :as store]))
 
 (defn- clamp [v lo hi] (max lo (min hi v)))
@@ -105,21 +106,85 @@
 
 ;; == FieldFlowTrace surface ===================================================
 
+(defn- incoming-with-from
+  "The connections into `element-id`, each augmented with :from-fields (its from
+   element's :fields vector) -- the shape em-frontend.model's sourcing
+   predicates expect, built here exactly as the incomplete-tooltip caller in
+   em-frontend.app builds it."
+  [store element-id]
+  (mapv #(assoc % :from-fields (:fields (get-in store [:elements (:from %)])))
+        (store/incoming-connections store element-id)))
+
+(defn- supplies-field?
+  "Does connection `c` supply `field-name` to its to-element? `c` carries the
+   model's :carried/:derived sourcing sets, the one definition of the
+   predicate; :carried together with (keys :derived) is what it supplies."
+  [c field-name]
+  (or (contains? (:carried c) field-name)
+      (contains? (:derived c) field-name)))
+
+(defn- upstream-of
+  "The (element, field) pairs a supplying connection pushes onto the frontier
+   once it has supplied `field-name`: (from, field-name) for a same-named
+   carrier (the value keeps its name upstream), and (from, each source field)
+   for a satisfied derivation. A connection that does both pushes both; a
+   derivation with no source fields pushes nothing, so the walk roots there."
+  [c field-name]
+  (into (if (contains? (:carried c) field-name) [[(:from c) field-name]] [])
+        (map (fn [source] [(:from c) source]))
+        (get (:derived c) field-name #{})))
+
 (defn select-field-for-trace
-  "rule FieldFlowHighlights: every connection carrying `field-name` forward
-   (source_fields contains it) or backward (target_field matches it) is
-   highlighted; the rest are dimmed. `highlighted_path` records the traced
-   elements -- every from/to endpoint of an on-path connection."
-  [store field-name]
+  "rule FieldFlowHighlights: highlights the connections that carry `field-name`
+   INTO `element-id`, transitively upstream, and dims every other connection in
+   the store (also when the traced set is empty). The walk is rooted at
+   (element, field) rather than being model-wide, so a connection elsewhere in
+   the model that merely mentions the same field name is not highlighted unless
+   a chain of supplying connections actually leads into the element.
+
+   A connection supplies a field name n to the element it points at when either
+   its from-element has a field named n (carried) or it carries a fully
+   satisfied FieldDerivation targeting n -- em-frontend.model/supplying-connections
+   is that predicate, the same carried/derived notion
+   Element.is_information_complete and unsourced-fields read.
+
+   The walk starts at (element, field-name). If that element introduces the
+   field via a FieldOrigin the value originates there, so the walk stops -- the
+   element stays on the traced path but nothing upstream of it does.
+   Otherwise every incoming connection supplying the field is added to the
+   traced set and pushes upstream: (from, each source field) for a satisfied
+   derivation, (from, the same field name) for a carrier. Termination: the
+   frontier only ever holds (element, field) pairs taken from the model's
+   finite element and field-name sets, and a visited set of pairs that have
+   been expanded means each pair is pushed and expanded at most once, so the
+   frontier empties -- even when connections form a cycle across timelines,
+   which ConnectionsRenderRightToLeft deliberately leaves unconstrained.
+   Pure and Dart-free, so it stays unit-testable.
+
+   `highlighted_path` records the traced elements -- every from/to endpoint of
+   an on-path connection."
+  [store element-id field-name]
   (let [connections (vals (:connections store))
-        on-derivation? (fn [d] (or (= (:target_field d) field-name)
-                                   (some #(= % field-name) (:source_fields d))))
-        on-path? (fn [c] (boolean (some on-derivation? (:derivations c))))
-        grouped (group-by on-path? connections)
+        introducing? (fn [eid field] (contains? (model/origin-field-names (get-in store [:elements eid]))
+                                                field))
+        supplying (fn [eid] (model/supplying-connections (get-in store [:elements eid])
+                                                         (incoming-with-from store eid)))
+        on-path-ids (loop [frontier [[element-id field-name]] visited #{} on-path #{}]
+                      (if (seq frontier)
+                        (let [[eid field] (first frontier)
+                              rest-frontier (rest frontier)]
+                          (if (or (contains? visited [eid field]) (introducing? eid field))
+                            (recur rest-frontier (conj visited [eid field]) on-path)
+                            (let [supplying-field (filterv #(supplies-field? % field) (supplying eid))]
+                              (recur (into rest-frontier (mapcat #(upstream-of % field)) supplying-field)
+                                     (conj visited [eid field])
+                                     (into on-path (map :id) supplying-field)))))
+                        on-path))
+        grouped (group-by #(contains? on-path-ids (:id %)) connections)
         on-path (get grouped true [])
-        off-path (get grouped false [])
-        path-elements (into #{} (mapcat (fn [c] [(:from c) (:to c)])) on-path)]
-    {:store (assoc-in store [:visualization :highlighted_path] path-elements)
+        off-path (get grouped false [])]
+    {:store (assoc-in store [:visualization :highlighted_path]
+                      (into #{} (mapcat (fn [c] [(:from c) (:to c)])) on-path))
      :effects (into (mapv (fn [c] {:type :connection-highlighted :connection (:id c)}) on-path)
                     (map (fn [c] {:type :connection-dimmed :connection (:id c)}))
                     off-path)}))

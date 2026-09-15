@@ -19,9 +19,64 @@
 (def canvas-field-kinds #{:command :event :read_model})
 
 (defn origin-field-names
-  "entity Element .origin_field_names: field_origins -> field"
+  "entity Element .origin_field_names: field_origins -> field. INTRODUCED: the
+   element itself is where these field values originate. A FieldOrigin is not a
+   connection property, so it has no counterpart in supplying-connections."
   [element]
   (into #{} (map :field) (:field_origins element)))
+
+(defn supplying-connections
+  "Per-element supplying connections: the incoming connections into an element
+   that supply it a field. Each connection keeps the existing :from-fields
+   convention (the from element's :fields vector) and gains
+
+     :carried  the names among this element's own field names that the
+               connection's from-element also has -- the value passes through
+               unchanged -- and
+     :derived  {target-name #{source names}} for every fully satisfied
+               FieldDerivation on that connection: every source_field exists as
+               a field name on the connection's from-element (one source under
+               a different name is a rename, several is an aggregation, the
+               transform itself is opaque). Several satisfied derivations
+               targeting one name contribute their sources together.
+
+   :carried together with (keys :derived) is the set of names the connection
+   SUPPLIES to this element. This function is the ONE definition of that
+   sourcing predicate -- the CARRIED and DERIVED cases of
+   Element.is_information_complete -- so carried-field-names,
+   derived-field-names, unsourced-fields and the field-flow trace cannot
+   diverge on what counts as sourced.
+
+   `element` may be nil, which offers no field names to carry and so projects
+   derivations alone: carrying is the only element-dependent half, and that is
+   what derived-field-names needs. `incoming-with-from` is a seq of connections
+   each augmented with :from-fields (the from element's :fields vector)."
+  [element incoming-with-from]
+  (let [field-names (into #{} (map :name) (or (:fields element) []))]
+    (mapv (fn [c]
+            (let [from-names (into #{} (map :name) (:from-fields c))]
+              (reduce (fn [c d]
+                        (if (every? #(contains? from-names %) (:source_fields d))
+                          (let [target (:target_field d)]
+                            (assoc c :derived
+                                   (assoc (:derived c) target
+                                          (into (get (:derived c) target #{})
+                                                (:source_fields d)))))
+                          c))
+                      (assoc c :carried (into #{} (filter #(contains? from-names %)) field-names)
+                             :derived {})
+                      (:derivations c))))
+          incoming-with-from)))
+
+(defn- carried-names
+  "The field names a supplying-connections seq carries into its element."
+  [supplying]
+  (into #{} (mapcat :carried) supplying))
+
+(defn- derived-names
+  "The field names a supplying-connections seq derives on its element."
+  [supplying]
+  (into #{} (mapcat (comp keys :derived)) supplying))
 
 (defn carried-field-names
   "entity Element .carried_field_names: names of fields on this element that
@@ -29,35 +84,32 @@
    `incoming-with-from` is a seq of connections each augmented with
    :from-fields (the from element's :fields vector)."
   [element incoming-with-from]
-  (let [from-names (into #{} (comp (mapcat :from-fields) (map :name)) incoming-with-from)]
-    (into #{} (comp (map :name) (filter #(contains? from-names %))) (:fields element))))
+  (carried-names (supplying-connections element incoming-with-from)))
 
 (defn derived-field-names
   "entity Element .derived_field_names: names of fields targeted by at least
    one fully-satisfied incoming derivation -- every source_field exists on that
    connection's from-element. Any one satisfied derivation suffices; multiple
    derivations targeting the same field are evaluated independently.
+   Carrying is the only element-dependent half of the sourcing predicate, so
+   this projects the per-connection :derived sets with no element.
    `incoming-with-from` is a seq of connections each augmented with
    :from-fields (the from element's :fields vector)."
   [incoming-with-from]
-  (into #{}
-        (mapcat (fn [c]
-                  (let [from-names (into #{} (map :name) (:from-fields c))]
-                    (keep (fn [d]
-                            (when (every? #(contains? from-names %) (:source_fields d))
-                              (:target_field d)))
-                          (:derivations c)))))
-        incoming-with-from))
+  (derived-names (supplying-connections nil incoming-with-from)))
 
 (defn unsourced-fields
   "entity Element .unsourced_fields: fields not in origin_field_names,
-   carried_field_names, or derived_field_names.
+   carried_field_names, or derived_field_names -- the three cases of
+   Element.is_information_complete, read off a single supplying-connections
+   pass.
    `incoming-with-from` is a seq of connections each augmented with
    :from-fields (the from element's :fields vector)."
   [element incoming-with-from]
-  (let [origins (origin-field-names element)
-        carried (carried-field-names element incoming-with-from)
-        derived (derived-field-names incoming-with-from)]
+  (let [supplying (supplying-connections element incoming-with-from)
+        origins (origin-field-names element)
+        carried (carried-names supplying)
+        derived (derived-names supplying)]
     (into [] (remove #(or (contains? origins (:name %))
                           (contains? carried (:name %))
                           (contains? derived (:name %))))
