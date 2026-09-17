@@ -11,8 +11,20 @@
    of a timeline in its own model. The store holds a single EventModel, so
    every element/timeline necessarily shares it -- what this checks instead
    is the referential integrity that guarantee rests on: a placement's
-   element and slice (and that slice's timeline) must actually resolve, a
-   correct emcli stream never leaves a placement pointing at nothing."
+   element and slice (and that slice's timeline) must actually resolve.
+
+   That is not a property the frontend may assume of its input. A placement
+   delta names its element by id alone, so a placement can name an element
+   whose record this client has not been given -- which is exactly what the
+   grey-box report was. The store keeps such a reference rather than inventing
+   or dropping it, and the canvas draws it as an unloaded placeholder instead
+   of as an element card (see `em-frontend.store/element-loaded?` and the
+   Canvas surface's UnloadedElementShownAsPlaceholder guarantee). A current
+   emcli stream seeds the model's whole element registry, so it no longer
+   produces one: this predicate describes what a store fed by a current stream
+   satisfies, not something the frontend enforces on whatever it is fed. The
+   grey-box session note in session-knowledge/ has the account, and
+   store_test's placement-for-an-unloaded-element-test pins both sides of this."
   [store-val]
   (every? (fn [p]
             (and (contains? (:elements store-val) (:element p))

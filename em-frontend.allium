@@ -36,7 +36,10 @@
 -- Structure governed by emcli's change-stream schema.
 external entity Delta {}
 
--- The seed payload of a (re)connection: a full nested snapshot of the model.
+-- The seed payload of a (re)connection: the whole model. Timelines nest their
+-- slices, placements and specifications; swimlanes and connections are flat
+-- lists; and the model's element registry travels beside them, each element in
+-- the canonical record shape the deltas use.
 external entity SnapshotSeed {}
 
 ------------------------------------------------------------
@@ -174,8 +177,13 @@ entity Slice {
 }
 
 -- An element in the model: a command, event, read model, screen or automation.
--- Appears in the snapshot only where it is placed or connected, but its
--- CreateElement delta always arrives on the stream.
+-- The snapshot carries every element of the model, in its element registry and
+-- in the canonical record shape the deltas use, so a consumer seeding from a
+-- snapshot can resolve every element id a later delta names -- including an
+-- element created before that consumer subscribed, whose CreateElement delta
+-- was emitted before the subscription opened and is never replayed. A placement,
+-- a connection and a specification step nest only a reduced display projection
+-- of the element they refer to.
 entity Element {
   model: EventModel
   name: String
@@ -855,6 +863,14 @@ rule InvalidDataVisible {
 
 -- A placement's element and slice must belong to the same model: an element
 -- can only be placed in a slice of a timeline in its own model.
+--
+-- This quantifies over the model, where a placement's element always exists.
+-- The store the frontend holds is a projection of that model, and a placement
+-- can name an element whose record has not reached this client (a placement
+-- delta names its element by id alone). No element record means no model to
+-- compare against, so such a placement is outside what this invariant can
+-- check -- the surface Canvas guarantee UnloadedElementShownAsPlaceholder
+-- states what the frontend draws for it instead.
 invariant PlacementWithinModel {
   for p in Placements:
     p.element.model = p.slice.timeline.model
@@ -942,7 +958,14 @@ actor StreamSource {
 -- model, and is deliberately unmodelled: a surface declares what it exposes
 -- and the actions it provides, not the gesture that opens it.
 -- Read-only side panel for a clicked element. Selecting a field here starts a
--- field-flow trace (see FieldFlowTrace).
+-- field-flow trace (see FieldFlowTrace). It reads the element's record where the
+-- frontend holds one; for an element whose record has not reached this client it
+-- shows none of that record's own facts -- no kind, context, swimlane, image or
+-- fields, and no completeness verdict to report -- and labels the element by the
+-- name its reference carries where there is one and by its id otherwise.
+-- Reporting a kind or a verdict there would assert something about an element the
+-- frontend cannot see, the reading surface Canvas's
+-- UnloadedElementShownAsPlaceholder excludes for the card.
 surface ElementDetails {
   facing viewer: Viewer
   context element: Element
@@ -1164,6 +1187,14 @@ surface Viewport {
 -- canvas_fields entries — as many as that height fits — rather than the whole
 -- list; the exact count is a renderer constant, left to the renderer in the
 -- same spirit as the layout geometry and extent measurement above.
+--
+-- The element fields this surface exposes are drawn only when the frontend holds
+-- the element's record: a placement can name an element whose full record has not
+-- reached this client, and then no name, kind, swimlane or canvas_fields of its
+-- own exist to draw. Such a placement is shown as an unloaded placeholder instead
+-- of a card (named by the name its reference carries, where there is one), so
+-- that a card standing for nothing is not mistaken for an element that is
+-- genuinely nameless and fieldless (see the guarantee below).
 surface Canvas {
   facing viewer: Viewer
   context timeline: Timeline
@@ -1187,6 +1218,18 @@ surface Canvas {
   @guarantee AlternatingBandShading
     -- Adjacent rows of a timeline table are visually distinguished by
     -- alternating band shading.
+
+  @guarantee UnloadedElementShownAsPlaceholder
+    -- A placement whose element the frontend holds no full record for is shown
+    -- as an unloaded placeholder, never as an element card: it is labelled
+    -- "element #<id>", or with the name its reference carries where there is
+    -- one, and no kind, swimlane or canvas_fields is drawn for it (none is
+    -- exposed above without a record to read them from), so an empty card cannot
+    -- be read as an element whose name and fields are simply empty. The
+    -- placeholder occupies the placement's cell and default card size -- the
+    -- unnamed band, since no element record means no swimlane either -- so the
+    -- table is laid out around it exactly as around a card rather than reflowed
+    -- to hide it.
 }
 
 -- The connection readout: the viewer's window onto the stream connection
