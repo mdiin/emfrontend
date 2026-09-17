@@ -1,10 +1,12 @@
 (ns em-frontend.app-test
-  "spec: `Rules` and `Invariants` sections of em-frontend.allium -- the
-   side effects of the reseed path on the transient ui state. Rule
-   ReconnectPreservesViewport reseeds the store from a fresh snapshot; the
-   ui map's in-flight animation state and error overlay belong to the
+  "spec: `Rules`, `Invariants` and `Surfaces` sections of em-frontend.allium.
+   Rule ReconnectPreservesViewport reseeds the store from a fresh snapshot;
+   the ui map's in-flight animation state and error overlay belong to the
    discarded store, so apply-outcome!'s :store-seeded branch resets them via
-   ui-after-reseed -- consistent with @invariant NoReplay."
+   ui-after-reseed -- consistent with @invariant NoReplay. surface
+   ConnectionStatus's readout is the app bar's presentation of
+   SSEConnection.state, kept a pure mapping so every state, and the
+   fail-closed fallback, can be pinned here without a widget."
   (:require [cljd.test :refer [deftest is testing]]
             [em-frontend.app :as app]))
 
@@ -28,3 +30,37 @@
           "a key outside the reseed's scope survives")
       (is (= {:c1 :highlighted} (:connection-visual after))
           "the field-flow highlight is view-local and survives"))))
+
+(deftest connection-presentation-test
+  (let [readout (fn [state] (app/connection-presentation {:sse-connection {:state state}}))]
+    (testing "surface ConnectionStatus (@guarantee ConnectionStateVisible):
+              every state the spec's SSEState enum declares gets its own
+              readout -- live, attempt in progress, or down -- and the spinner
+              is pinned to the two mid-attempt states, so the renderer's
+              reading of a state is asserted rather than incidental"
+      (is (= {:label "Connected" :icon :cloud-done :in-progress? false :alarm? false}
+             (readout :connected)))
+      (is (= {:label "Connecting" :icon :cloud-queue :in-progress? true :alarm? false}
+             (readout :connecting)))
+      (is (= {:label "Reconnecting" :icon :cloud-queue :in-progress? true :alarm? false}
+             (readout :reconnecting)))
+      (is (= {:label "Disconnected" :icon :cloud-off :in-progress? false :alarm? true}
+             (readout :error)))
+      (is (not= (readout :connected) (readout :connecting))
+          "the live reading is distinguishable from the in-progress one")
+      (is (not= (readout :connecting) (readout :error))
+          "the in-progress reading is distinguishable from the down one")
+      (is (not= (readout :connected) (readout :error))
+          "the live reading is distinguishable from the down one, as the
+           guarantee requires"))
+    (testing "the readout reads SSEConnection.state, not the Visualization's
+              state: a store carrying only a visualization state falls back
+              rather than reporting it as the connection's"
+      (is (= {:label "Disconnected" :icon :cloud-off :in-progress? false :alarm? true}
+             (app/connection-presentation {:visualization {:state :connected}}))))
+    (testing "the fallback fails closed: a state outside the enum, or none at
+              all, reads as a down connection -- never as a live one"
+      (is (= {:label "Disconnected" :icon :cloud-off :in-progress? false :alarm? true}
+             (app/connection-presentation nil)))
+      (is (= {:label "Disconnected" :icon :cloud-off :in-progress? false :alarm? true}
+             (readout :half-open))))))

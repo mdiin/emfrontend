@@ -446,6 +446,76 @@
 
 ;; == Root ======================================================================
 
+(defn connection-presentation
+  "surface ConnectionStatus (@guarantee ConnectionStateVisible): everything the
+   app bar's readout shows for the store's connection state -- the label, which
+   icon, whether a progress spinner replaces that icon, and whether the readout
+   is alarmed. That map is the readout's contract, so this is pure and takes the
+   store: what it reads (`SSEConnection.state`) and the map it produces are
+   pinned together by connection-presentation-test. How the widget then draws
+   that map -- spinner over icon, glyph, tint -- is not covered by this
+   repository's tests, which have no widget harness and cannot see the private
+   readout (cljd.test itself supports widget runners: the gap is this repo's,
+   not the framework's); it is recorded as an accepted gap rather than claimed
+   as covered. The label wording and the icon/spinner choice are renderer
+   constants -- the spec models the three-way distinction, not the strings.
+
+   The fallback is unreachable in the app: `initial-store` seeds :connecting
+   and every other writer passes one of the four literals, so no store state is
+   nil or unknown. It fails closed -- an unrecognised state reads as any other
+   down connection, alarm included -- rather than showing a healthy readout for
+   a state it cannot account for."
+  [st]
+  (case (get-in st [:sse-connection :state])
+    :connected    {:label "Connected"    :icon :cloud-done  :in-progress? false :alarm? false}
+    :connecting   {:label "Connecting"   :icon :cloud-queue :in-progress? true  :alarm? false}
+    :reconnecting {:label "Reconnecting" :icon :cloud-queue :in-progress? true  :alarm? false}
+    :error        {:label "Disconnected" :icon :cloud-off   :in-progress? false :alarm? true}
+    {:label "Disconnected" :icon :cloud-off :in-progress? false :alarm? true}))
+
+(defn- connection-status
+  "surface ConnectionStatus (@guarantee ConnectionStateVisible): the app bar's
+   readout of SSEConnection.state. The spinner replaces the icon while an
+   attempt is in progress, so a live stream, a connection attempt and a failed
+   stream are told apart at a glance; a failed stream is tinted so the state
+   that asks for the viewer's attention is the one that draws it.
+
+   Draws the map connection-presentation returns. It owns no state, reads no
+   view state, takes no callbacks and can move nothing -- but the drawing is
+   its own: the spinner stands in for the icon while an attempt is in progress,
+   the icon keyword picks the glyph, and the alarm flag picks the tint. Nothing
+   in this repository's tests reaches any of that -- no widget harness here, and
+   this widget is private (see connection-presentation) -- so it is recorded as
+   an accepted gap rather than claimed as covered. The label sits in a
+   min-width box, so none of the labels this readout ships shuffles the buttons
+   beside it; the tint is a renderer constant whose nil case (no alarm) merges
+   to the AppBar's own foreground colour."
+  [st]
+  (let [{:keys [label icon in-progress? alarm?]} (connection-presentation st)
+        tint (when alarm? m/Colors.red.shade700)]
+    (m/Padding
+      .padding (m/EdgeInsets.only .left 4.0 .right 12.0)
+      .child
+      (m/Row
+        .mainAxisSize m/MainAxisSize.min
+        .children
+        [(m/SizedBox
+           .width 16.0
+           .height 16.0
+           .child
+           (if in-progress?
+             (m/CircularProgressIndicator .strokeWidth 2.0)
+             (m/Icon (case icon
+                       :cloud-done m/Icons.cloud_done
+                       :cloud-queue m/Icons.cloud_queue
+                       :cloud-off m/Icons.cloud_off)
+                     .size 16.0
+                     .color tint)))
+         (m/SizedBox .width 6.0)
+         (m/ConstrainedBox
+           .constraints (m/BoxConstraints .minWidth 104.0)
+           .child (m/Text label .style (m/TextStyle .fontSize 14.0 .color tint)))]))))
+
 (defn- app-bar [st store-atom ui-atom transform-controller stream-handle]
   (m/AppBar
     .title (m/Text (or (get-in st [:event-model :name]) "Event Model Visualization"))
@@ -460,7 +530,13 @@
      (m/IconButton
        .icon (m/Icon m/Icons.refresh)
        .tooltip "Reload model"
-       .onPressed (fn [] (reload-model! store-atom ui-atom stream-handle) nil))]
+       .onPressed (fn [] (reload-model! store-atom ui-atom stream-handle) nil))
+     ;; surface ConnectionStatus (@guarantee ConnectionStateVisible): the
+     ;; readout of the state the reload and the retry move. Last, after the
+     ;; two actions, so it reads as a status rather than a third button; the
+     ;; width it holds (see connection-status) is what keeps the two buttons
+     ;; beside it from moving.
+     (connection-status st)]
     .bottom
     (m/PreferredSize
       .preferredSize (m/Size.fromHeight 40.0)

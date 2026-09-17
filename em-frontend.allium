@@ -1188,3 +1188,26 @@ surface Canvas {
     -- Adjacent rows of a timeline table are visually distinguished by
     -- alternating band shading.
 }
+
+-- The connection readout: the viewer's window onto the stream connection
+-- itself, in the app bar and present whenever the app is running. It names
+-- SSEConnection.state, so a live stream is distinguishable from one still
+-- (re)connecting and from one that has failed and to which a reload no longer
+-- applies -- without it, the state moves `ReloadRestartsConnection` and
+-- `RetryRestartsConnection` make would be invisible to the viewer. How each
+-- state reads -- the wording of the label, the icon, the progress indicator
+-- and any alarm styling -- is a renderer constant, left to the renderer in
+-- the same spirit as the layout geometry and animation durations above.
+surface ConnectionStatus {
+  facing viewer: Viewer
+  context connection: SSEConnection
+
+  exposes:
+    connection.state
+
+  @guarantee ConnectionStateVisible
+    -- The states the readout shows are distinguishable to the viewer:
+    -- connected reads as a live connection, connecting and reconnecting as
+    -- a connection attempt in progress, and error as a connection that is
+    -- down until the viewer retries.
+}
