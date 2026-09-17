@@ -242,6 +242,22 @@ Re-checked against the current tree; all still as previously recorded. **Do not
   3. `stream.cljd:156-157` + `store.cljd:254-270` — a partial element can reach
      the store in the first place.
 
+> **Annotation (added by the 2026-09-17 grey-box session; the list above is kept
+> as written).** The *diagnosis* behind the list was wrong and is corrected in
+> `2026-09-17-grey-box.md`: the grey box was a placement naming an element record
+> the client was never given (the snapshot reached elements only where the
+> projection placed or wired them, and `PlaceElement` emits only the placement),
+> which none of these three causes produces. Cause 1 is now **narrowed** — a
+> kind-less record is routed to an explicit amber unloaded placeholder
+> (`canvas/card-presentation`), and the grey fallback survives only for a
+> *loaded* record whose kind is outside the palette, which a current wire cannot
+> produce. Causes 2 and 3 remain deferred exactly as listed: `element-updated`
+> still replaces (`store.cljd`, now line ~199) and the gap-fillers can still
+> write a partial `{id,name}` record (`stream.cljd`, now ~194-205), with the
+> mitigating difference that either now renders visibly as "not loaded" rather
+> than as a nameless grey card. The line numbers in the list above are stale: the
+> file has grown, so re-derive them.
+
 ---
 
 ## 5. Recommended actions, ordered

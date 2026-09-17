@@ -357,12 +357,49 @@ delta into the stored element (like the connection path) instead of replacing
 it, so a delta that omits `:kind`/`:name`/`:fields` cannot erase them. That
 change was **deliberately deferred** in favour of the reload button.
 
+> **Correction — this paragraph's diagnosis is DISPROVED (added by the
+> 2026-09-17 grey-box session; the original wording is kept deliberately).**
+> Cause 2 is not the cause and merging would not have fixed the grey box.
+> Element deltas always carry the **full** entity -- `../thecli/src/emcli/rules.clj`
+> (`updated` fetches the whole record and injects the derived flag, line ~30) and
+> `../thecli/docs/change-stream.md`'s "Update (full new entity state is sent)" --
+> so a delta can never erase `:kind`/`:name`/`:fields`. The frontend received
+> **no element entity at all** for the offending id: the snapshot reached
+> elements only where the projection placed or wired them, so an element that was
+> unplaced and unwired at snapshot time was absent entirely, and `place-element`
+> emits only the placement (`../thecli/src/emcli/rules.clj`, `:PlaceElement`
+> commits `[(created :placement p)]`), naming the element by bare id. Cause 1
+> (unknown `:kind` -> grey) was the *colourer* -- it is why the ghost was grey --
+> and cause 3 explains the milder flavour (a connection-endpoint `{id,name}`
+> partial gives a grey card *with* a name, never a nameless one).
+>
+> **Fixed at the source and guarded** (see
+> `2026-09-17-grey-box.md`): `../thecli`'s snapshot now carries the model's whole
+> element registry (`model.elements`, built through one `canonical-entity`), this
+> repo seeds `:elements` from it and renders any record it does not hold as an
+> explicit unloaded placeholder (`canvas/card-presentation`, `store/element-loaded?`,
+> `surface Canvas`'s `UnloadedElementShownAsPlaceholder`) instead of a nameless
+> grey card. `element-updated` still replaces, as recorded here, and that
+> remaining cause-2 exposure is now *visible* rather than silent: a partial
+> update flips a loaded card to the placeholder. `allium check` stayed at
+> baseline here (3 warnings / 2 infos, exit 1; lines moved to
+> 37/43/43/142/266), and the reload button -- this session's shipped remedy --
+> remains the way out of the version-skew case where a stream predates the
+> registry.
+
 ---
 
 ## Follow-up pointers
 
 - The reload button is the shipped remedy for the grey-box symptom; the
   delta-merge root-cause fix (section f, cause 2) is still open.
+  > **Correction (added by the weed pass, annotated again 2026-09-17):** there
+  > was no delta-merge root cause. The grey box was a dangling placement
+  > (`2026-09-17-grey-box.md`), fixed at the source in `../thecli` and guarded
+  > here; `element-updated` still replaces, and that remaining cause-2 exposure
+  > now shows as an explicit "not loaded" placeholder rather than a nameless grey
+  > card. The reload button is unchanged and still the way out of a stream that
+  > predates the registry.
 - Before trusting anything in section a, re-run `allium check` — the recorded
   diagnostic set is only valid while the spec is otherwise unchanged.
 - This file was created as the single permitted new file for the task that
