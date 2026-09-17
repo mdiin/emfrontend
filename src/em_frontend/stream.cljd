@@ -14,13 +14,17 @@
      than one change per event for a cascading delete or DeleteSwimlane's
      un-assign-then-delete, applied atomically.
    - The snapshot's `model` is a NESTED projection: timelines nest slices,
-     slices nest placements (each with a full embedded `element`) and
-     specifications (each with `steps[]`); swimlanes and connections are
-     flat top-level lists, but a connection's `from`/`to` are partial
-     embedded `{id, name}` objects, not bare ids. A delta's `entity` is
+     slices nest placements (each naming its element, and carrying a reduced
+     display projection of it) and specifications (each with `steps[]`); the
+     model's elements are ALSO listed flat under `elements`, each entry the
+     canonical record a delta carries, and swimlanes and connections are flat
+     top-level lists, but a connection's `from`/`to` are partial embedded
+     `{id, name}` objects, not bare ids. A delta's `entity` is
      always the FLAT canonical record (foreign keys as bare ids) --
      `normalize-snapshot` and the entity-normalizers below deliberately
-     differ on `from`/`to`/`element` shape for exactly this reason.
+     differ on `from`/`to` shape for exactly this reason, while a spec-step's
+     `element` ref is reduced to the bare id on both paths, so that field
+     holds one shape in the store.
    - `SetConnectionDerivations` is the only op that ever updates (rather
      than creates/deletes) a connection, so `type=connection, action=updated`
      unambiguously means ConnectionDerivationsRerenders, never
@@ -89,11 +93,15 @@
     {:tag tag :attrs attrs :children children}))
 
 (defn- norm-element
-  "Handles both shapes: a delta's flat canonical element entity (context,
-   field_origins, image_url, wireframe always present when set) and the
-   snapshot's embedded element (id, name, kind, swimlane,
-   is_information_complete, fields only -- other keys are simply absent until
-   a later delta fills them in; `get` on a missing key is nil either way)."
+  "A canonical element record: the shape a delta's element entity and a snapshot's
+   `elements` registry entry both use (id, name, kind, context, fields,
+   field_origins, is_information_complete, and swimlane/image_url/wireframe when
+   the element carries them). The wire's `type` and `model` keys are not kept --
+   this store is single-model and indexes by id, and both paths drop them
+   identically. A snapshot that predates the registry carries a reduced
+   projection under a placement instead (id, name, kind, swimlane,
+   is_information_complete, image_url, wireframe and the flat field shapes); `get`
+   on a missing key is nil either way, so both normalize through here."
   [m]
   {:id (get m "id")
    :name (get m "name")
@@ -117,6 +125,21 @@
 (defn- norm-swimlane [m]
   {:id (get m "id") :name (get m "name") :index (get m "index")})
 
+(defn- norm-element-ref
+  "A step's element reference as the bare element id this store indexes elements
+   by. A snapshot nests a `{id, name}` ref where a delta carries the bare id, and
+   the id is all any lookup against the store needs -- keeping the nested object
+   would leave two shapes in one field. An error step carries no element at all
+   (the snapshot sends null, a delta omits the key), so nil stays nil. The
+   snapshot's ref is a decoded JSON object, which satisfies no ClojureDart
+   protocol -- `map?` is false for it -- hence the dart/is? test, exactly as
+   norm-wireframe-node tests its attrs slot."
+  [el]
+  (cond
+    (nil? el) nil
+    (dart/is? el dart:core/Map) (get el "id")
+    :else el))
+
 (defn- norm-spec-step [m spec-id]
   {:id (get m "id")
    :spec spec-id
@@ -125,7 +148,7 @@
    :is_error (get m "is_error")
    :expect_empty (get m "expect_empty")
    :examples (mapv norm-example (or (get m "examples") []))
-   :element (get m "element")
+   :element (norm-element-ref (get m "element"))
    :error_name (get m "error_name")})
 
 (defn- norm-specification [m slice-id spec-steps!]
@@ -135,13 +158,16 @@
     {:id id :slice slice-id :title (get m "title")}))
 
 (defn- norm-placement
-  "A snapshot placement embeds its element in full; register it into the
-   elements index being built (a later connection referencing the same
-   element only ever contributes a partial {id,name}, so this, being fuller,
-   must win -- see the merge in norm-connection-snapshot)."
+  "A snapshot placement is a reference, not a payload: only the element id is
+   kept, and the element's own record comes from the model's `elements` registry
+   (see `normalize-snapshot`). The nested projection is still registered when it
+   is the only record available -- a snapshot from an emcli predating the
+   registry has no `elements` at all -- and then only into a gap, so it can never
+   replace a canonical registry record with a reduced one."
   [m slice-id elements!]
   (let [el (norm-element (get m "element"))]
-    (swap! elements! assoc (:id el) el)
+    (when-not (contains? @elements! (:id el))
+      (swap! elements! assoc (:id el) el))
     {:id (get m "id") :slice slice-id :element (:id el)}))
 
 (defn- norm-slice [m timeline-id placements! specifications! spec-steps! elements!]
@@ -164,14 +190,17 @@
     {:id id :title (get m "title")}))
 
 (defn- norm-connection-snapshot
-  "A snapshot connection's `from`/`to` are partial embedded {id,name}
-   objects; register that partial record into the elements index only if
-   the placement walk above hasn't already contributed the fuller entity."
+  "A snapshot connection's `from`/`to` are partial embedded {id,name} objects;
+   only their ids are kept -- the element records come from the model's element
+   registry. On a snapshot without one, register the partial into an empty gap
+   only: it carries a name but no kind, so it is not a record the canvas will
+   present as an element (see em-frontend.store/element-loaded?)."
   [m elements!]
   (let [from-m (get m "from") to-m (get m "to")
         from-id (get from-m "id") to-id (get to-m "id")]
-    (swap! elements! update from-id #(merge {:id from-id :name (get from-m "name")} %))
-    (swap! elements! update to-id #(merge {:id to-id :name (get to-m "name")} %))
+    (doseq [[id nm] [[from-id (get from-m "name")] [to-id (get to-m "name")]]]
+      (when-not (contains? @elements! id)
+        (swap! elements! assoc id {:id id :name nm})))
     {:id (get m "id") :from from-id :to to-id
      :derivations (mapv norm-field-derivation (or (get m "derivations") []))}))
 
@@ -180,14 +209,20 @@
 
 (defn normalize-snapshot
   "Raw JSON string (the `snapshot` SSE event's `data:` payload) -> the flat,
-   id-indexed shape em-frontend.store/snapshot-received expects. Timelines
-   (and everything they nest) are walked before connections, so that a
-   placement's full embedded element always wins over a connection's
-   partial one for the same id."
+   id-indexed shape em-frontend.store/snapshot-received expects.
+
+   The element index is seeded from the model's own `elements` registry, whose
+   entries are already the canonical record a delta carries, so a placement or
+   connection resolves whatever the nested projections happen to include -- they
+   are references into that registry, not the element's payload. Seeding it
+   first means the projection walks below can only fill a gap; a snapshot from an
+   emcli predating the registry has no `elements` at all, and then they are the
+   only source, exactly as before."
   [raw-json]
   (let [m (get (convert/json.decode raw-json) "model")
+        elements! (atom (index-by-id norm-element (get m "elements")))
         slices! (atom {}) placements! (atom {})
-        specifications! (atom {}) spec-steps! (atom {}) elements! (atom {})
+        specifications! (atom {}) spec-steps! (atom {})
         timelines (index-by-id
                     #(norm-timeline % slices! placements! specifications! spec-steps! elements!)
                     (get m "timelines"))
