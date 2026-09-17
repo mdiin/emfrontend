@@ -44,6 +44,31 @@
 (defn placements-of-element [store element-id]
   (filter #(= (:element %) element-id) (vals (:placements store))))
 
+(defn element-loaded?
+  "True when `element` is a record this client was actually given: a full
+   Element, so neither nil nor a bare reference that carried only an id (and
+   maybe a name). A placement can reference an element id whose record has
+   never reached this client, and the store keeps it as it arrived -- the
+   reference is never invented into, or dropped from, a state the wire did not
+   send. What must not happen is such a placement being drawn *as* an element:
+   an absent record has no name, no kind and no fields, so a card drawn from it
+   is a nameless grey box that lies about what the wire said. The canvas
+   therefore renders it as an unloaded card instead (see
+   em-frontend.canvas/card-presentation), and the placement's cell keeps its
+   geometry, so the fix is presentation-only.
+
+   A full element always carries its `kind` -- every element entity on the wire
+   does, in the snapshot's registry and in deltas alike -- so `kind` is the
+   marker of a loaded record. A connection endpoint's partial {id, name}
+   reference is deliberately not one: it reaches the store only when no record
+   for that id arrived -- a snapshot that predates the registry, or one whose
+   registry did not reach it -- where it fills a gap, and it is not a record the
+   canvas will present as an element. The arrangement that leaves a placement
+   unloaded is the grey-box report's subject: see the grey-box session note in
+   session-knowledge/."
+  [element]
+  (some? (:kind element)))
+
 (defn outgoing-connections [store element-id]
   (filter #(= (:from %) element-id) (vals (:connections store))))
 

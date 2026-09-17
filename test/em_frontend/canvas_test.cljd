@@ -1,9 +1,13 @@
 (ns em-frontend.canvas-test
   "Tests for pure geometry helpers in em-frontend.canvas: swimlane-aware
-   vertical anchor selection (edge-endpoints) and per-bundle x-nudge
+   vertical anchor selection (edge-endpoints), per-bundle x-nudge
    assignment (build-timeline-render-model stagger logic, exercised here
-   directly from the underlying grouping math)."
+   directly from the underlying grouping math), and card-presentation, the
+   pure decision a placement's card is drawn from -- including the element
+   record this client never received. The material import is for those
+   colour assertions only."
   (:require [cljd.test :refer [deftest is testing]]
+            ["package:flutter/material.dart" :as m]
             [em-frontend.canvas :as canvas]))
 
 ;; == edge-endpoints ==========================================================
@@ -191,3 +195,82 @@
           "the from-anchor sits exactly on the curve")
       (is (= :c1 (canvas/hit-test-edge edges (+ fx 2.0) fy 6.0)))
       (is (nil? (canvas/hit-test-edge edges (+ fx 1000.0) fy 6.0))))))
+
+;; == card-presentation =======================================================
+
+;; A loaded element, as the wire supplies one (ids are integers, as on the
+;; wire), plus the three inputs that are NOT a loaded element: nil, a bare
+;; {id, name} reference (what a connection endpoint contributes to the element
+;; index), and a record whose kind the palette does not know.
+
+(def ^:private loaded-element
+  {:id 1 :name "PlaceOrder" :kind :command :context :internal
+   :is_information_complete true :fields [] :field_origins []
+   :swimlane nil :image_url nil})
+
+(deftest card-presentation-loaded-test
+  (testing "a loaded record shows the element's own name and its kind's outline colour"
+    (is (= {:unloaded? false :name "PlaceOrder"
+            :outline-color m/Colors.blue :incomplete? false}
+           (canvas/card-presentation 1 loaded-element)))
+    (testing "an unnamed loaded element still shows the empty name it always did"
+      (is (= "" (:name (canvas/card-presentation 1 (assoc loaded-element :name nil))))))
+    (testing "the red ring follows is_information_complete, so an absent flag is not an incomplete one"
+      (is (true? (:incomplete? (canvas/card-presentation
+                                 1 (assoc loaded-element :is_information_complete false)))))
+      (is (false? (:incomplete? (canvas/card-presentation
+                                  1 (assoc loaded-element :is_information_complete nil)))))))
+  (testing "an unknown kind is still a loaded record -- a card, in the grey fallback"
+    (let [p (canvas/card-presentation 1 (assoc loaded-element :kind :mystery))]
+      (is (false? (:unloaded? p)))
+      (is (= m/Colors.grey (:outline-color p))))))
+
+(deftest card-presentation-unloaded-test
+  (testing "no record at all: unloaded, named by its id, and outlined in a colour
+            that cannot be read as the grey an unknown kind gets"
+    (let [p (canvas/card-presentation 9 nil)]
+      (is (true? (:unloaded? p)))
+      (is (= "element #9" (:name p)))
+      (is (= m/Colors.amber.shade700 (:outline-color p)))
+      (is (false? (:incomplete? p)))
+      (is (not= (:outline-color (canvas/card-presentation 1 (assoc loaded-element :kind :mystery)))
+                (:outline-color p))
+          "a known element whose kind the palette lacks is told apart from a record this client never got")))
+  (testing "a bare {id, name} reference is unloaded too, and keeps the name it does carry"
+    (let [p (canvas/card-presentation 9 {:id 9 :name "CancelOrder"})]
+      (is (true? (:unloaded? p)))
+      (is (= "CancelOrder" (:name p)))
+      (is (= m/Colors.amber.shade700 (:outline-color p))))))
+
+;; == build-timeline-render-model: an unloaded placement =======================
+
+;; A store holding a placement whose element record never arrived -- the
+;; arrangement that used to be drawn as a nameless grey box.
+
+(defn- store-with-an-unloaded-placement []
+  {:timelines {1 {:id 1 :title "Checkout"}}
+   :slices {10 {:id 10 :timeline 1 :title "Place order"
+                :kind :state_change :status :done :index 0}}
+   :swimlanes {}
+   :elements {1 {:id 1 :name "PlaceOrder" :kind :command :context :internal
+                 :is_information_complete true :fields [] :field_origins []
+                 :swimlane nil :image_url nil}}
+   :placements {100 {:id 100 :slice 10 :element 1}
+                101 {:id 101 :slice 10 :element 9}}
+   :connections {}})
+
+(deftest build-timeline-render-model-keeps-an-unloaded-placement-cell-test
+  (testing "a placement whose element never arrived still gets its cell, with the
+            element left unresolved -- the placeholder is presentation-only, so
+            nothing reflows and the table keeps the cell the element's card would
+            have occupied"
+    (let [model (canvas/build-timeline-render-model (store-with-an-unloaded-placement) 1)
+          cells (:placements (:layout model))
+          cell-of (fn [element-id] (first (filter #(= element-id (:element-id %)) cells)))]
+      (is (= 2 (count cells)))
+      (is (nil? (get (:elements model) 9))
+          "the render model hands the painter no element for that placement")
+      (is (some? (:rect (cell-of 9))))
+      (is (= (:width (:rect (cell-of 1))) (:width (:rect (cell-of 9))))
+          "an unloaded element is not a screen, so the cell keeps the default card size")
+      (is (= (:height (:rect (cell-of 1))) (:height (:rect (cell-of 9))))))))

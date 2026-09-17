@@ -294,6 +294,41 @@
       (is (nil? (get-in store [:placements :p1])))
       (is (= [{:type :timeline-laid-out :timeline :t1}] effects)))))
 
+(deftest placement-for-an-unloaded-element-test
+  (testing "a placement can reference an element record this client has never
+            been given: the placement lands and the element stays unloaded, so
+            the card is drawn as unloaded rather than as an element that merely
+            looks nameless and fieldless"
+    (let [store (store-with-snapshot)
+          {:keys [store]} (store/apply-delta store {:entity :placement :change :created
+                                                    :data {:id :p9 :slice :s1 :element :e9}})]
+      (is (= {:id :p9 :slice :s1 :element :e9} (get-in store [:placements :p9])))
+      (is (not (store/element-loaded? (get-in store [:elements :e9])))
+          "no element record for :e9 ever arrived on this connection")
+      (is (store/element-loaded? (get-in store [:elements :e1])))
+      (is (not (invariants/placement-within-model? store))
+          "and the referential-integrity predicate is therefore false on it --
+           the state this frontend tolerates and renders as unloaded, not one it
+           must reject: see that predicate's docstring")))
+  (testing "the markers of an unloaded record: nil, and a connection endpoint's
+            partial {id, name} reference, which carries no kind"
+    (is (not (store/element-loaded? nil)))
+    (is (not (store/element-loaded? {:id :e9 :name "CancelOrder"})))))
+
+(deftest element-creation-loads-a-placement-that-arrived-first-test
+  (testing "the element's own record -- its delta here, a snapshot else -- turns
+            the unloaded card into a card"
+    (let [store (store-with-snapshot)
+          {:keys [store]} (store/apply-delta store {:entity :placement :change :created
+                                                    :data {:id :p9 :slice :s1 :element :e9}})
+          element {:id :e9 :name "CancelOrder" :kind :command :context :internal
+                   :is_information_complete true :fields [] :field_origins []
+                   :swimlane nil :image_url nil}
+          {:keys [store]} (store/apply-delta store {:entity :element :change :created
+                                                    :data element})]
+      (is (store/element-loaded? (get-in store [:elements :e9])))
+      (is (= element (get-in store [:elements :e9]))))))
+
 ;; == Invalid data + generic dispatch ==========================================
 
 (deftest invalid-data-visible-test

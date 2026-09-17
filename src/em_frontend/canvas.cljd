@@ -2,7 +2,12 @@
   "spec: the Canvas surface, plus the rendering conventions implied
    throughout the Rules section: canvas_fields per ElementKind, a persistent
    red outer ring while is_information_complete = false, and the
-   highlighted/dimmed connection styling FieldFlowHighlights declares.
+   highlighted/dimmed connection styling FieldFlowHighlights declares. The
+   surface's UnloadedElementShownAsPlaceholder guarantee is a convention of its
+   own among them: a placement whose element record this client has not been
+   given is drawn as an unloaded placeholder rather than as an element card (see
+   `card-presentation`) -- a card must never claim to be an element it cannot
+   show.
    AGENTS.md calls for a CustomPainter doing viewport-culled painting; one
    painter is built per Timeline (matching the Canvas surface's own
    `context timeline: Timeline`), so an off-screen timeline's table is
@@ -298,29 +303,74 @@
 ;; are drawn; the rest do not fit.
 (def ^:private max-card-field-lines 4)
 
+(defn card-presentation
+  "The decision `draw-element-card` needs about the element a placement refers
+   to: whether this client holds a record for it at all, what to name the card,
+   which colour to outline it in, and whether it carries the incomplete ring.
+   Takes the placement's `element-id` and the store's element record for it,
+   which may be nil.
+
+   A loaded record (`em-frontend.store/element-loaded?`) gives the element's own
+   name, its kind's outline colour with the grey fallback for a kind the palette
+   does not know, and the red-ring flag. An unloaded one -- no record at all, or
+   a bare reference such as a connection endpoint's {id, name} -- gives
+   `:unloaded? true`, the name when the reference carries one and the id
+   otherwise, and a placeholder outline: grey would be ambiguous here, since
+   grey is also what a known element with an unknown kind gets, so the
+   placeholder is amber. What the card then draws from this -- the fill, the
+   \"not loaded\" line and its wording, and the body (a wireframe or the leading
+   canvas fields) -- is the painter's, and is not covered by this repository's
+   tests, which have no widget harness (cljd.test itself supports widget
+   runners: the gap is this repo's, not the framework's). The card keeps its
+   cell either way: an unloaded record is a fact about what this client was
+   told, not a reason to reflow the table."
+  [element-id element]
+  (if (store/element-loaded? element)
+    {:unloaded? false
+     :name (or (:name element) "")
+     :outline-color (get element-kind-color (:kind element) m/Colors.grey)
+     :incomplete? (false? (:is_information_complete element))}
+    {:unloaded? true
+     :name (or (:name element) (str "element #" element-id))
+     :outline-color m/Colors.amber.shade700
+     :incomplete? false}))
+
 (defn- draw-element-card
-  "Draws one element card onto `canvas` at `rect`. Factored out so the
-   alpha-fading path can wrap it in saveLayer/restore."
-  [^m/Canvas canvas rect element]
-  (let [incomplete (false? (:is_information_complete element))
-        kind-color (get element-kind-color (:kind element) m/Colors.grey)
+  "Draws one card onto `canvas` at `rect` -- see `card-presentation` for what
+   the card claims. An unloaded card is deliberately not drawn as an element
+   card: it is not filled, it lists no fields and no wireframe, and it claims
+   no completeness ring, so it cannot be read as an element whose name and
+   fields happen to be missing. Factored out so the alpha-fading path can wrap
+   it in saveLayer/restore."
+  [^m/Canvas canvas rect element-id element]
+  (let [{:keys [unloaded? name outline-color incomplete?]} (card-presentation element-id element)
         rrect (m/RRect.fromRectAndRadius (rect->m rect) (m/Radius.circular 6.0))
         outer-rrect (m/RRect.fromRectAndRadius
                       (m/Rect.fromLTWH (- (:x rect) 3.0) (- (:y rect) 3.0)
                                        (+ (:width rect) 6.0) (+ (:height rect) 6.0))
                       (m/Radius.circular 8.0))]
-    (.drawRRect canvas rrect (fill-paint m/Colors.white))
-    (.drawRRect canvas rrect (stroke-paint kind-color 1.5))
-    (when incomplete
+    (when-not unloaded?
+      (.drawRRect canvas rrect (fill-paint m/Colors.white)))
+    (.drawRRect canvas rrect (stroke-paint outline-color 1.5))
+    (when incomplete?
       (.drawRRect canvas outer-rrect (stroke-paint m/Colors.red 1.0)))
-    (draw-text canvas (or (:name element) "") (+ (:x rect) 8.0) (+ (:y rect) 8.0)
-               (m/TextStyle .fontWeight m/FontWeight.bold .fontSize 13.0 .color m/Colors.black)
+    (draw-text canvas name (+ (:x rect) 8.0) (+ (:y rect) 8.0)
+               (m/TextStyle .fontWeight m/FontWeight.bold .fontSize 13.0
+                            .color (if unloaded? m/Colors.grey.shade700 m/Colors.black))
                (- (:width rect) 16.0))
-    (if (and (= :screen (:kind element)) (:wireframe element))
+    (cond
+      unloaded?
+      (draw-text canvas "not loaded" (+ (:x rect) 8.0) (+ (:y rect) 28.0)
+                 (m/TextStyle .fontSize 11.0 .color m/Colors.grey.shade600)
+                 (- (:width rect) 16.0))
+
+      (and (= :screen (:kind element)) (:wireframe element))
       (let [content-rect {:x (+ (:x rect) 8.0) :y (+ (:y rect) 28.0)
                           :width (- (:width rect) 16.0)
                           :height (- (:height rect) 36.0)}]
         (draw-wf-node canvas content-rect (:wireframe element) element))
+
+      :else
       (doseq [[i field] (map-indexed vector (take max-card-field-lines (model/canvas-fields element)))]
         (draw-text canvas (str (:name field) ": " (name (or (:type field) "")))
                    (+ (:x rect) 8.0) (+ (:y rect) 28.0 (* i 16.0))
@@ -400,9 +450,9 @@
                                   (.-color! (m/Color.fromARGB (int (* 255.0 alpha)) 0 0 0))
                                   (.-blendMode! m/BlendMode.modulate))]
               (.saveLayer canvas (rect->m rect) opacity-paint)
-              (draw-element-card canvas rect element)
+              (draw-element-card canvas rect element-id element)
               (.restore canvas))
-            (draw-element-card canvas rect element)))
+            (draw-element-card canvas rect element-id element)))
         (.restore canvas)
         nil)
       (shouldRepaint [this _] true))))
