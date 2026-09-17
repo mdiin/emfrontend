@@ -31,6 +31,31 @@
       (is (= {:c1 :highlighted} (:connection-visual after))
           "the field-flow highlight is view-local and survives"))))
 
+(deftest element-details-presentation-test
+  (let [store {:elements {1 {:id 1 :name "PlaceOrder" :kind :command :context :internal
+                             :is_information_complete true :fields [] :field_origins []
+                             :swimlane nil :image_url nil}
+                          2 {:id 2 :name "OrderPlaced" :kind :event :context :internal
+                             :is_information_complete false :fields [] :field_origins []
+                             :swimlane nil :image_url nil}
+                          ;; a connection endpoint's bare reference: it reaches the
+                          ;; index only on a snapshot that predates the registry
+                          3 {:id 3 :name "OrderCancelled"}}}
+        reading (fn [id] (app/element-details-presentation store id))]
+    (testing "surface ElementDetails: completeness is read three ways, not two --
+              a record this client was never given has no verdict, and reporting
+              it complete would assert something about an element the frontend
+              cannot see (the canvas placeholder's lie, one surface over)"
+      (is (= {:title "PlaceOrder" :completeness :complete} (reading 1)))
+      (is (= {:title "OrderPlaced" :completeness :incomplete} (reading 2)))
+      (is (= {:title "OrderCancelled" :completeness :not-loaded} (reading 3)))
+      (is (= {:title "element #9" :completeness :not-loaded} (reading 9))
+          "an absent record is named by the id the placement carries, not left blank")
+      (is (= :not-loaded
+             (:completeness (app/element-details-presentation
+                              (assoc-in store [:elements 9] {:id 9 :name "Partial"}) 9)))
+          "a connection endpoint's bare reference is not a record either"))))
+
 (deftest connection-presentation-test
   (let [readout (fn [state] (app/connection-presentation {:sse-connection {:state state}}))]
     (testing "surface ConnectionStatus (@guarantee ConnectionStateVisible):

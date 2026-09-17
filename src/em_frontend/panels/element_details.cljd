@@ -1,7 +1,16 @@
 (ns em-frontend.panels.element-details
   "spec: surface ElementDetails -- read-only side panel for a clicked
    element. Selecting a field starts a field-flow trace (see
-   em-frontend.panels.field-flow-trace)."
+   em-frontend.panels.field-flow-trace).
+
+   Everything it shows about the element is driven by `:presentation` (see
+   em-frontend.app/element-details-presentation) as far as the title and the
+   completeness reading go: the title, and whether the element reads as complete,
+   incomplete, or -- for a record this client was never given -- not loaded at
+   all. The remaining rows read the element map itself. In the not-loaded case
+   the panel shows none of them (no kind, context, swimlane or image, and no
+   fields), because the panel holds none; claiming a verdict or a kind there is
+   what the canvas placeholder was fixed for."
   (:require ["package:flutter/material.dart" :as m]))
 
 (defn- field-tile [field on-select-field]
@@ -13,40 +22,57 @@
                            (when (= (:cardinality field) :list) " [list]")))
     .onTap (fn [] (on-select-field (:name field)) nil)))
 
+(defn- completeness-reading
+  "The label and colour each `:completeness` value reads as. `case`, not a
+   fallback: the presentation can only produce these three, so a fourth value is
+   a bug worth failing on rather than mislabelling."
+  [completeness]
+  (case completeness
+    :not-loaded {:label "not loaded" :color m/Colors.grey.shade700}
+    :incomplete {:label "information incomplete" :color m/Colors.amber.shade800}
+    :complete   {:label "information complete" :color m/Colors.green}))
+
+(defn- not-loaded-rows []
+  [(m/Text "not loaded" .style (m/TextStyle .fontWeight m/FontWeight.w600
+                                            .color m/Colors.grey.shade700))
+   (m/Text "the stream has not sent this element's record"
+           .style (m/TextStyle .fontSize 11.0 .color m/Colors.grey.shade700))])
+
 (defn element-details-panel
-  "{:keys [element swimlane-name on-select-field on-close]}"
-  [{:keys [element swimlane-name on-select-field on-close]}]
-  (m/SizedBox
-    .width double/infinity
-    .child
-    (m/Card
+  "{:keys [element presentation swimlane-name on-select-field on-close]}"
+  [{:keys [element presentation swimlane-name on-select-field on-close]}]
+  (let [{:keys [title completeness]} presentation
+        {:keys [label color]} (completeness-reading completeness)]
+    (m/SizedBox
+      .width double/infinity
       .child
-      (m/Padding
-        .padding (m/EdgeInsets.all 12.0)
+      (m/Card
         .child
-        (m/Column
-          .crossAxisAlignment m/CrossAxisAlignment.start
-          .mainAxisSize m/MainAxisSize.min
-          .children
-          [(m/Row
-             .mainAxisAlignment m/MainAxisAlignment.spaceBetween
-             .children
-             [(m/Text (:name element) .style (m/TextStyle .fontWeight m/FontWeight.bold .fontSize 16.0))
-              (m/IconButton .icon (m/Icon m/Icons.close) .onPressed (fn [] (on-close) nil))])
-           (m/Text (str "kind: " (if (some? (:kind element)) (name (:kind element)) "(unknown)")))
-           (m/Text (str "context: " (if (some? (:context element)) (name (:context element)) "(unknown)")))
-           (if (some? swimlane-name)
-             (m/Text (str "swimlane: " swimlane-name))
-             (m/Text "swimlane: (unassigned)"))
-           (if (some? (:image_url element))
-             (m/Image.network (:image_url element) .height 96.0)
-             (m/SizedBox .height 0.0))
-           (m/Text (if (not (false? (:is_information_complete element))) "information complete" "information incomplete")
-                   .style (m/TextStyle .color (if (not (false? (:is_information_complete element)))
-                                                 m/Colors.green
-                                                 m/Colors.amber.shade800)))
-           (m/Divider)
-           (m/Text "Fields" .style (m/TextStyle .fontWeight m/FontWeight.w600))
-           (m/Column
-             .mainAxisSize m/MainAxisSize.min
-             .children (mapv #(field-tile % on-select-field) (:fields element)))])))))
+        (m/Padding
+          .padding (m/EdgeInsets.all 12.0)
+          .child
+          (m/Column
+            .crossAxisAlignment m/CrossAxisAlignment.start
+            .mainAxisSize m/MainAxisSize.min
+            .children
+            (into [(m/Row
+                     .mainAxisAlignment m/MainAxisAlignment.spaceBetween
+                     .children
+                     [(m/Text title .style (m/TextStyle .fontWeight m/FontWeight.bold .fontSize 16.0))
+                      (m/IconButton .icon (m/Icon m/Icons.close) .onPressed (fn [] (on-close) nil))])]
+                  (if (= :not-loaded completeness)
+                    (not-loaded-rows)
+                    [(m/Text (str "kind: " (if (some? (:kind element)) (name (:kind element)) "(unknown)")))
+                     (m/Text (str "context: " (if (some? (:context element)) (name (:context element)) "(unknown)")))
+                     (if (some? swimlane-name)
+                       (m/Text (str "swimlane: " swimlane-name))
+                       (m/Text "swimlane: (unassigned)"))
+                     (if (some? (:image_url element))
+                       (m/Image.network (:image_url element) .height 96.0)
+                       (m/SizedBox .height 0.0))
+                     (m/Text label .style (m/TextStyle .color color))
+                     (m/Divider)
+                     (m/Text "Fields" .style (m/TextStyle .fontWeight m/FontWeight.w600))
+                     (m/Column
+                       .mainAxisSize m/MainAxisSize.min
+                       .children (mapv #(field-tile % on-select-field) (:fields element)))]))))))))

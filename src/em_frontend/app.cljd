@@ -418,6 +418,7 @@
              .child
              (p.element-details/element-details-panel
                {:element element
+                :presentation (element-details-presentation st eid)
                 :swimlane-name (get-in st [:swimlanes (:swimlane element) :name])
                 :on-select-field
                 (fn [field-name] (apply-outcome! store-atom ui-atom (interaction/select-field-for-trace @store-atom eid field-name)))
@@ -472,6 +473,33 @@
     :reconnecting {:label "Reconnecting" :icon :cloud-queue :in-progress? true  :alarm? false}
     :error        {:label "Disconnected" :icon :cloud-off   :in-progress? false :alarm? true}
     {:label "Disconnected" :icon :cloud-off :in-progress? false :alarm? true}))
+
+(defn element-details-presentation
+  "surface ElementDetails: the panel's reading of the element the viewer
+   selected, as plain data so it can be pinned without a widget. Pure and
+   store-taking, the way `connection-presentation` is: the read site
+   (`[:elements element-id]`) and the reading stay tied together by
+   element-details-presentation-test.
+
+   `:completeness` is three-way, not two. A record this client has not been given
+   has no verdict to report, and reporting it complete would assert something
+   about an element the frontend cannot see -- the same lie the canvas used to
+   tell with a nameless card (see surface Canvas's
+   UnloadedElementShownAsPlaceholder and em-frontend.store/element-loaded?). The
+   panel shows no fields, kind, swimlane or image for such an element either,
+   because it holds none.
+
+   `:title` names the element by the name its record carries, else by its id --
+   so an unloaded element is named rather than shown blank, exactly as its canvas
+   placeholder is. Which wording and colour each `:completeness` value reads as
+   is the renderer's, like every other label in this app."
+  [st element-id]
+  (let [element (get-in st [:elements element-id])]
+    {:title (or (:name element) (str "element #" element-id))
+     :completeness (cond
+                     (not (store/element-loaded? element)) :not-loaded
+                     (false? (:is_information_complete element)) :incomplete
+                     :else :complete)}))
 
 (defn- connection-status
   "surface ConnectionStatus (@guarantee ConnectionStateVisible): the app bar's
